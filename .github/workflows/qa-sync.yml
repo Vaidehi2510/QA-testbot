@@ -1,0 +1,32 @@
+name: QA sync
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes
+  workflow_dispatch:           # and a manual "Run" button
+
+permissions:
+  contents: write              # to commit the roll-up in THIS repo
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install --no-audit --no-fund
+      - run: node src/run.js
+        env:
+          APP_ID: ${{ secrets.QA_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.QA_APP_PRIVATE_KEY }}
+          TARGET_OWNER: ${{ vars.TARGET_OWNER }}
+          TARGET_REPO: ${{ vars.TARGET_REPO }}
+      - name: Commit roll-up
+        run: |
+          git config user.name "qa-bot"
+          git config user.email "qa-bot@users.noreply.github.com"
+          git add docs/QA_DASHBOARD.md
+          git commit -m "chore: update QA roll-up" || echo "No changes"
+          git push || echo "Nothing to push"

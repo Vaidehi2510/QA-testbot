@@ -1,0 +1,83 @@
+[
+  {
+    "id": "ui",
+    "label": "UI / Frontend",
+    "match": ["\\.tsx$", "\\.jsx$", "^frontend/", "/components/"],
+    "testSteps": [
+      "Open the affected screens and confirm they render correctly",
+      "Check the layout on both desktop and mobile widths",
+      "Verify buttons, forms, and links behave as expected"
+    ],
+    "regression": ["Previously working pages still render", "Shared components are not broken"],
+    "expected": ["No visual regressions", "Interactive elements respond correctly"]
+  },
+  {
+    "id": "api",
+    "label": "Backend / API",
+    "match": ["^api/", "^routes/", "^controllers/", "^services/", "/api/"],
+    "testSteps": [
+      "Call the affected endpoints with valid input and confirm correct responses",
+      "Send invalid or missing input and confirm errors are handled",
+      "Check status codes and response shape"
+    ],
+    "regression": ["Related endpoints still respond correctly", "Unrelated API contracts are unchanged"],
+    "expected": ["Endpoints return correct data and status codes", "Errors are handled gracefully"]
+  },
+  {
+    "id": "auth",
+    "label": "Authentication",
+    "match": ["auth", "login", "session"],
+    "testSteps": [
+      "Verify login works with valid credentials",
+      "Verify login fails with invalid credentials",
+      "Verify logout clears the session",
+      "Verify session timeout behaves correctly"
+    ],
+    "regression": ["Existing login flow", "Password reset", "Session persistence across refresh"],
+    "expected": ["Users can log in and out", "Invalid logins are rejected", "Sessions expire as configured"]
+  },
+  {
+    "id": "payments",
+    "label": "Payments / Billing",
+    "match": ["payments", "billing", "pricing"],
+    "testSteps": [
+      "Run a test transaction end to end",
+      "Verify totals, taxes, and currency are correct",
+      "Verify declined or failed payments are handled"
+    ],
+    "regression": ["Existing checkout flow", "Invoice / receipt generation", "Refund handling"],
+    "expected": ["Payments process correctly", "Amounts are accurate", "Failures are handled safely"]
+  },
+  {
+    "id": "database",
+    "label": "Database",
+    "match": ["migrations/", "schema", "database"],
+    "testSteps": [
+      "Apply the migration on a copy of the data and confirm it runs cleanly",
+      "Verify reads and writes still work after the change",
+      "Confirm the migration can roll back if supported"
+    ],
+    "regression": ["Existing queries return correct data", "No data loss during migration"],
+    "expected": ["Migration applies without errors", "Data integrity is preserved"]
+  },
+  {
+    "id": "deployment",
+    "label": "Deployment / Infra",
+    "match": ["^config/", "deployment", "infrastructure", "Dockerfile"],
+    "testSteps": [
+      "Deploy to a staging environment",
+      "Run a smoke test: the app boots and core pages load",
+      "Check the logs for startup errors"
+    ],
+    "regression": ["App starts cleanly", "Environment variables and secrets resolve"],
+    "expected": ["Service comes up healthy", "No new startup errors"]
+  },
+  {
+    "id": "tests",
+    "label": "Test suite",
+    "match": ["^tests/", "\\.test\\.", "\\.spec\\."],
+    "testSteps": ["Run the related test suite and confirm it passes", "Confirm new tests actually cover the change"],
+    "regression": ["The full test suite still passes"],
+    "expected": ["All tests are green"]
+  }
+]

@@ -1,0 +1,6 @@
+{
+  "releaseMilestone": "v1.4",
+  "needsQaLabel": "needs-qa",
+  "completeLabel": "qa-complete",
+  "signoffCommand": "/qa-tested"
+}

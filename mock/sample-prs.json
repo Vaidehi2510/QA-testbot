@@ -1,0 +1,37 @@
+[
+  {
+    "number": 101, "title": "Add checkout retry logic", "url": "https://github.com/acme/apollo/pull/101",
+    "body": "Retries failed checkout calls up to 3 times before showing an error.",
+    "state": "open", "labels": ["needs-qa"], "milestone": "v1.4",
+    "files": ["frontend/checkout/Retry.tsx", "api/checkout/retry.ts"],
+    "reviews": [{ "user": "intern-lee", "state": "APPROVED", "submittedAt": "2026-06-14T11:00:00Z" }],
+    "comments": [{ "user": "intern-sam", "body": "Looks good. /qa-tested result:pass", "createdAt": "2026-06-14T10:00:00Z" }]
+  },
+  {
+    "number": 102, "title": "Fix login redirect loop", "url": "https://github.com/acme/apollo/pull/102",
+    "body": "Fixes the redirect loop users hit after logging in from the pricing page.",
+    "state": "open", "labels": ["needs-qa"], "milestone": "v1.4",
+    "files": ["auth/session.ts", "frontend/components/Login.tsx"],
+    "reviews": [{ "user": "intern-lee", "state": "APPROVED", "submittedAt": "2026-06-14T11:30:00Z" }],
+    "comments": []
+  },
+  {
+    "number": 103, "title": "Update pricing table", "url": "https://github.com/acme/apollo/pull/103",
+    "body": "New annual pricing tiers.",
+    "state": "open", "labels": ["needs-qa"], "milestone": "v1.4",
+    "files": ["frontend/pricing/Table.tsx", "billing/pricing.ts"],
+    "reviews": [
+      { "user": "intern-sam", "state": "APPROVED", "submittedAt": "2026-06-14T09:00:00Z" },
+      { "user": "intern-lee", "state": "APPROVED", "submittedAt": "2026-06-14T09:30:00Z" },
+      { "user": "intern-ravi", "state": "APPROVED", "submittedAt": "2026-06-14T09:45:00Z" }
+    ],
+    "comments": []
+  },
+  {
+    "number": 104, "title": "Add mobile nav drawer", "url": "https://github.com/acme/apollo/pull/104",
+    "body": "Adds a slide-out navigation drawer on small screens.",
+    "state": "open", "labels": ["needs-qa"], "milestone": "v1.4",
+    "files": ["frontend/components/NavDrawer.tsx"],
+    "reviews": [], "comments": []
+  }
+]
