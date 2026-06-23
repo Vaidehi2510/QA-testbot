@@ -1,0 +1,24 @@
+name: QA Plan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:   # manual "Run workflow" button for demo
+
+permissions:
+  contents: read
+  pull-requests: write   # to post comments and labels
+  issues: write
+
+jobs:
+  qa-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          script: |
+            const run = require('./qa-bot/plan-on-pr.js')
+            await run({ github, context, core })

@@ -1,0 +1,24 @@
+name: QA Coverage Report
+
+on:
+  workflow_dispatch:   # "Run workflow" button — required for live demo
+  schedule:
+    - cron: '0 9 * * 5'   # also every Friday at 09:00 UTC
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          script: |
+            const run = require('./qa-bot/coverage-report.js')
+            await run({ github, context, core })

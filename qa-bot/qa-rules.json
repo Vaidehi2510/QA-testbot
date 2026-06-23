@@ -1,0 +1,101 @@
+[
+  {
+    "id": "frames-ui",
+    "label": "Frames UI",
+    "match": ["frontend/.*[Ff]rame", "/frames/", "components/.*[Ff]rame"],
+    "testSteps": [
+      "Open Frames; click Refresh and confirm existing Frames load",
+      "Create/edit a sentinel Frame and confirm body + tags persist",
+      "Toggle a Frame active and verify the active-only filter"
+    ],
+    "regression": ["Frames list still loads after Hub sign-in", "Active toggle persists across refresh"],
+    "expected": ["Frames CRUD works", "Active state is consistent with the server"]
+  },
+  {
+    "id": "import-export",
+    "label": "Import / Export",
+    "match": ["import", "export"],
+    "testSteps": [
+      "Import a .md sample and confirm the body (and sentinel) populate",
+      "Export to Markdown and confirm content fidelity",
+      "Re-import the same file twice; cancel an export; export a name with unsafe characters"
+    ],
+    "regression": ["Import replaces the whole body", "Exported filename is OS-safe and ends in .md"],
+    "expected": ["Import/export preserve content", "Cancel is a no-op with no error"]
+  },
+  {
+    "id": "chat-injection",
+    "label": "Frame injection in chat",
+    "match": [
+      "ravnar.*(inject|frame|context|system|prompt)",
+      "inject",
+      "system.?prompt",
+      "frontend/.*chat.*(frame|inject|context)"
+    ],
+    "testSteps": [
+      "Activate a sentinel Frame; start a NEW chat and ask for its marker (don't type the marker)",
+      "Deactivate the Frame; new chat; confirm the marker is gone",
+      "Activate two Frames; confirm both markers inject; edit one and confirm the fresh body is used"
+    ],
+    "regression": ["Deactivation clears context in new chats", "Multiple active Frames all inject"],
+    "expected": ["Active Frames inject deterministically at run start", "A single failed Frame fetch should not drop all Frames"]
+  },
+  {
+    "id": "openrouter",
+    "label": "OpenRouter",
+    "match": ["openrouter", "frontend/.*model.?browser", "frontend/.*model.?picker"],
+    "testSteps": [
+      "Open Browse Models and confirm the catalog loads with NO API key",
+      "Save a tester key; confirm it is hidden afterward; Replace then Cancel keeps the old key",
+      "Enable a model; confirm the no-key chat guard; trigger a visible error with an invalid key"
+    ],
+    "regression": ["Catalog browsing works unauthenticated", "Composer model switcher groups by source"],
+    "expected": ["Keys never shown in clear text", "OpenRouter models not selectable without a saved key", "Model errors surface visibly, not a silent stall"]
+  },
+  {
+    "id": "auth",
+    "label": "Hub / OAuth",
+    "match": ["auth", "oauth", "keycloak", "session", "login", "hub"],
+    "testSteps": [
+      "Sign into the Hub via the system-browser OAuth flow",
+      "Confirm Hub models appear without creating a new API key",
+      "Open Frames and confirm it loads without a separate sign-in"
+    ],
+    "regression": ["Hub/Frames auth state agree after restart", "OAuth session restores or re-auths cleanly"],
+    "expected": ["Fresh OAuth sign-in surfaces Hub models", "No Hub/Frames disconnect-reconnect needed"]
+  },
+  {
+    "id": "backend-go",
+    "label": "Backend / Go",
+    "match": ["\\.go$", "internal/", "cmd/"],
+    "testSteps": [
+      "Run go test ./... after the frontend build and note any failures",
+      "Confirm the bearer-stamping proxy still routes Frames requests"
+    ],
+    "regression": ["Known internal/ravnar static:null test is unchanged", "Proxy keeps OAuth tokens out of the frontend"],
+    "expected": ["No new backend test failures introduced by this PR"]
+  },
+  {
+    "id": "deps-security",
+    "label": "Dependencies / Security",
+    "match": ["package\\.json", "package-lock\\.json", "go\\.mod", "go\\.sum", "esbuild"],
+    "testSteps": [
+      "Confirm the app still builds and launches after the dependency change",
+      "Run a smoke test of the most affected feature area"
+    ],
+    "regression": ["App boots cleanly", "No new install/build warnings beyond known ones"],
+    "expected": ["Dependency bump introduces no functional regression"]
+  },
+  {
+    "id": "build-package",
+    "label": "Build / Packaging",
+    "match": ["\\.github/workflows/", "Dockerfile", "package app", "embed", "\\.pixi"],
+    "testSteps": [
+      "Confirm Package App jobs pass for macOS, Windows, and Linux",
+      "Verify the artifact SHA-256 matches the shipped hash",
+      "Launch the packaged app and confirm no stray local artifacts were bundled"
+    ],
+    "regression": ["Packaging succeeds on all three platforms"],
+    "expected": ["Artifacts build and verify", "No accidental local files (e.g. .pixi/) in the bundle"]
+  }
+]
