@@ -1,9 +1,7 @@
 name: QA sync
 
 on:
-  schedule:
-    - cron: '*/10 * * * *'   # every 10 minutes
-  workflow_dispatch:           # and a manual "Run" button
+  workflow_dispatch:           # manual legacy GitHub App sync
 
 permissions:
   contents: write              # to commit the roll-up in THIS repo
