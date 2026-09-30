@@ -4,6 +4,9 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
+const crypto = require('node:crypto');
+const { githubSnapshot } = require('./ai/snapshot');
+const { screenshotType } = require('./images');
 
 async function getClient({ appId, privateKey, owner, repo, token }) {
   const { Octokit } = await import('@octokit/rest');
@@ -46,10 +49,11 @@ async function fetchPR(gh, owner, repo, number, config = {}) {
       return { path: f.path, content: Buffer.from(data.content, 'base64').toString('utf8').slice(0, 50000) };
     } catch { inspectionLimitations.push(`Existing test unavailable: ${f.path}`); return { path: f.path, content: '' }; }
   }));
+  const aiSnapshot = config.ai?.enabled ? await githubSnapshot(gh, owner, repo, pr.head.sha, tree.tree, files, config.ai) : {};
   return { repository: `${owner}/${repo}`, number, title: pr.title, body: pr.body || '', url: pr.html_url,
     author: pr.user.login, state: pr.state, revision: pr.head.sha, baseRevision: pr.base.sha,
     labels: (pr.labels || []).map(l => l.name), files: files.map(f => ({ filename: f.filename, patch: f.patch || '', status: f.status })),
-    existingTests, specifications, inspectionLimitations,
+    existingTests, specifications, inspectionLimitations, ...aiSnapshot,
     comments: comments.map(c => ({ id: c.id, user: c.user?.login, body: c.body, createdAt: c.created_at })) };
 }
 
@@ -106,18 +110,49 @@ async function workflowRuns(gh, owner, repo) {
 async function readResultsArtifact(gh, owner, repo, workflow, key) {
   const artifacts = await gh.paginate(gh.rest.actions.listWorkflowRunArtifacts, { owner, repo, run_id: workflow.id, per_page: 100 });
   const artifact = artifacts.find(a => a.name === `qa-results-${key}-attempt-${workflow.run_attempt}` && !a.expired);
-  if (!artifact || artifact.size_in_bytes > 5 * 1024 * 1024) return null;
+  if (!artifact || artifact.size_in_bytes > 16 * 1024 * 1024) return null;
   const { data } = await gh.rest.actions.downloadArtifact({ owner, repo, artifact_id: artifact.id, archive_format: 'zip' });
   const bytes = Buffer.from(data);
-  if (bytes.length > 5 * 1024 * 1024) throw new Error('Result artifact exceeds size limit');
+  if (bytes.length > 16 * 1024 * 1024) throw new Error('Result artifact exceeds size limit');
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-result-'));
   try {
     const filename = path.join(directory, 'artifact.zip');
     await fs.writeFile(filename, bytes);
     // Never extract or execute artifact content in the privileged controller.
     const { stdout } = await execFileAsync('unzip', ['-p', filename, 'results.json'], { timeout: 5000, maxBuffer: 2 * 1024 * 1024 });
-    return JSON.parse(stdout);
+    const envelope = JSON.parse(stdout);
+    const screenshots = [];
+    let imageBytes = 0;
+    const limitations = Array.isArray(envelope.screenshotLimitations) ? envelope.screenshotLimitations.filter(value => typeof value === 'string').slice(0, 30) : [];
+    for (const item of (Array.isArray(envelope.screenshots) ? envelope.screenshots : []).slice(0, 4)) {
+      try {
+        if (!/^screenshots\/[a-f0-9]{64}\.(png|jpg)$/.test(item.path || '') || item.revision !== envelope.revision ||
+          !envelope.results?.some(result => result.checkId === item.checkId)) throw new Error('Invalid screenshot identity');
+        const { stdout: image } = await execFileAsync('unzip', ['-p', filename, item.path], { timeout: 5000, maxBuffer: 2 * 1024 * 1024, encoding: 'buffer' });
+        imageBytes += image.length;
+        if (imageBytes > 6 * 1024 * 1024 || crypto.createHash('sha256').update(image).digest('hex') !== item.sha256) throw new Error('Screenshot size/hash mismatch');
+        const type = screenshotType(image);
+        if (!type || type.mimeType !== item.mimeType) throw new Error('Screenshot signature or dimensions mismatch');
+        screenshots.push({ name: String(item.name || item.path).slice(0, 150), path: item.path, mimeType: item.mimeType, sha256: item.sha256,
+          revision: item.revision, checkId: item.checkId, data: image.toString('base64') });
+      } catch { limitations.push('Screenshot evidence was missing, oversized, or invalid; visual coverage is incomplete.'); }
+    }
+    return { ...envelope, screenshots, screenshotLimitations: limitations };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
-module.exports = { getClient, fetchPR, fetchReleasePRs, upsertComment, updateLabels, workflowRuns, readResultsArtifact };
+async function readRunScreenshots(gh, owner, repo, run) {
+  const envelope = await readResultsArtifact(gh, owner, repo, { id: Number(run.actionsRunId), run_attempt: run.actionsAttempt }, run.key);
+  if (envelope?.schemaVersion !== 1 || envelope.repository !== run.repository || Number(envelope.prNumber) !== run.pr.number ||
+    envelope.revision !== run.revision || envelope.environment !== run.environment || envelope.runId !== run.runId ||
+    envelope.attempt !== run.attempt || String(envelope.actionsRunId) !== String(run.actionsRunId) || Number(envelope.actionsAttempt) !== Number(run.actionsAttempt)) {
+    throw new Error('Screenshot report identity changed');
+  }
+  const expected = run.screenshots || [];
+  const images = envelope.screenshots || [];
+  if (images.length !== expected.length || images.some(image => !expected.some(item => item.path === image.path && item.sha256 === image.sha256 &&
+    item.checkId === image.checkId && item.revision === image.revision && item.mimeType === image.mimeType))) throw new Error('Screenshot manifest changed');
+  return images;
+}
+
+module.exports = { getClient, fetchPR, fetchReleasePRs, upsertComment, updateLabels, workflowRuns, readResultsArtifact, readRunScreenshots };

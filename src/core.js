@@ -15,6 +15,10 @@ function deriveOutcome(plan, results = [], decisions = [], revision) {
       source = decisions.filter((decision) => !decision.invalidatedAt && decision.checkId === check.id && decision.revision === revision)
         .sort((left, right) => (Date.parse(left.timestamp) || 0) - (Date.parse(right.timestamp) || 0)).at(-1);
       status = source?.result === 'pass' ? 'passed' : source?.result === 'fail' ? 'failed' : 'awaiting_human';
+    } else if (check.method === 'analysis') {
+      // Set only by the trusted AI coordinator, never by a model's free-form
+      // verdict. This records review completion separately from executed tests.
+      status = check.revision === revision && ['passed', 'execution_error'].includes(check.analysisStatus) ? check.analysisStatus : 'blocked';
     } else if (check.method === 'automated') {
       const matches = results.filter((result) => result.checkId === check.id && (!result.revision || result.revision === revision));
       // Duplicate/conflicting reports are an ingestion error, never an opportunity to choose a pass.

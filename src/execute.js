@@ -11,7 +11,7 @@ async function main(args = process.argv.slice(2)) {
   const fixture = args.includes('--allow-local-fixture');
   if (!fixture) { request.metadata.fixture = false; request.config.execution = { ...request.config.execution, isolation: 'container' }; }
   const envelope = await executePlan({ ...request, cwd: path.resolve(option('--checkout')), outputDir: path.resolve(option('--output')), allowLocal: fixture, sourceAttestation: args.includes('--attestation') ? path.resolve(option('--attestation')) : undefined, metadata: { ...request.metadata, actionsRunId: process.env.GITHUB_RUN_ID, actionsAttempt: Number(process.env.GITHUB_RUN_ATTEMPT || 1) } });
-  console.log(JSON.stringify({ runId: envelope.runId, revision: envelope.revision, results: envelope.results.map(({ checkId, status }) => ({ checkId, status })) }));
+  console.log(JSON.stringify({ runId: envelope.runId, revision: envelope.revision, results: envelope.results.map(({ checkId, status }) => ({ checkId, status })), ...(envelope.screenshots ? { screenshots: envelope.screenshots.length, screenshotLimitations: envelope.screenshotLimitations } : {}) }));
   return envelope;
 }
 

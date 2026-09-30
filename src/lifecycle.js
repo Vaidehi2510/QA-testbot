@@ -61,7 +61,7 @@ function completeRun(state, key, envelope, workflow) {
     envelope.revision !== run.revision || envelope.environment !== run.environment || envelope.runId !== run.runId ||
     envelope.attempt !== run.attempt || String(envelope.actionsRunId) !== String(workflow.id) || Number(envelope.actionsAttempt) !== Number(workflow.run_attempt)) {
     error = 'Result identity does not match the exact persisted execution request';
-  } else if (!Array.isArray(envelope.results)) error = 'Invalid result schema';
+  } else if (!Array.isArray(envelope.results) || envelope.results.some(result => !result || typeof result !== 'object' || Array.isArray(result))) error = 'Invalid result schema';
   else {
     const allowed = new Set(run.plan.checks.filter(c => c.method === 'automated').map(c => c.id));
     const ids = envelope.results.map(r => r.checkId);
@@ -76,6 +76,10 @@ function completeRun(state, key, envelope, workflow) {
     })) error = 'Structured test counts contradict the reported result';
   }
   run.results = error ? errorResults(run, error) : structuredClone(envelope.results);
+  const images = error ? [] : structuredClone(Array.isArray(envelope?.screenshots) ? envelope.screenshots.filter(image => image && typeof image === 'object' && !Array.isArray(image)) : []);
+  run.screenshots = images.map(({ data, ...metadata }) => metadata);
+  Object.defineProperty(run, 'reviewScreenshots', { value: images, enumerable: false, configurable: true, writable: true });
+  run.screenshotLimitations = error ? [] : structuredClone(envelope?.screenshotLimitations || []);
   if (workflow.conclusion !== 'success') {
     // Even a report saying pass cannot override cancellation, timeout, or job failure.
     const failed = run.results.some(r => r.status === 'failed' || r.status === 'execution_error');
@@ -86,6 +90,11 @@ function completeRun(state, key, envelope, workflow) {
   run.completionEvent = eventKey;
   run.resultCollectionPending = !envelope;
   run.evidenceUrl = workflow.html_url;
+  if (run.ai) {
+    delete run.ai.completion;
+    const gate = run.plan.checks.find(check => check.id === 'ai-team-review');
+    if (gate) gate.analysisStatus = 'blocked';
+  }
   run.outcome = deriveOutcome(run.plan, run.results, run.decisions, run.revision);
   run.report.status = 'pending';
   return { run, duplicate: false };
@@ -98,13 +107,13 @@ function ingestDecisions(state, run, comments, config) {
     if (state.comments[key] || !/^\/qa-tested\b/.test(comment.body || '')) continue;
     const pr = { ...run.pr, revision: run.revision, repository: run.repository };
     const result = recordDecision(comment, run.plan, pr, config);
-    if (result.accepted && Date.parse(result.decision.timestamp) < Date.parse(run.createdAt)) {
+    const request = run.requests.find(request => request.checkId === result.decision?.checkId);
+    if (result.accepted && Date.parse(result.decision.timestamp) < Date.parse(request?.createdAt || run.createdAt)) {
       result.accepted = false; result.reason = 'Decision predates this QA assessment';
     }
     state.comments[key] = { accepted: result.accepted, reason: result.reason, processedAt: now(), runKey: run.key };
     if (!result.accepted) continue;
     run.decisions.push(result.decision);
-    const request = run.requests.find(r => r.checkId === result.decision.checkId);
     if (request) { request.status = 'resolved'; request.decision = result.decision; }
     changed = true;
   }

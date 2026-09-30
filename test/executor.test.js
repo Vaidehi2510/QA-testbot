@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { executePlan, parseTap, runnerCommand, runProcess, readRevision, snapshotCheckout } = require('../src/executor');
+const { executePlan, parseTap, runnerCommand, runProcess, readRevision, snapshotCheckout, collectScreenshots, startScreenshotCapture } = require('../src/executor');
 const { dispatchExecution } = require('../src/dispatch');
 const { prepare } = require('../src/prepare-execution');
 
@@ -231,4 +231,146 @@ for index, name in enumerate(['root/../../escape', 'root/link', 'root/safe.js'])
 `;
   const result = spawnSync('python3', ['-B', '-c', testScript], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
+});
+
+const screenshotPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZz8AAAAASUVORK5CYII=', 'base64');
+
+test('screenshots are content-addressed evidence bound to exact revision and check', (t) => {
+  const options = setup(t);
+  const directory = path.join(options.cwd, 'evidence');
+  fs.mkdirSync(directory);
+  fs.writeFileSync(path.join(directory, 'checkout-mobile.png'), screenshotPng);
+  const collected = collectScreenshots(directory, options.outputDir, { revision: options.metadata.revision, checkId: 'ui-mobile' });
+  assert.equal(collected.screenshots.length, 1);
+  assert.deepEqual(collected.limitations, []);
+  const screenshot = collected.screenshots[0];
+  assert.equal(screenshot.revision, options.metadata.revision);
+  assert.equal(screenshot.checkId, 'ui-mobile');
+  assert.equal(screenshot.mimeType, 'image/png');
+  assert.equal(screenshot.name, 'checkout-mobile.png');
+  assert.match(screenshot.path, /^screenshots\/[a-f0-9]{64}\.png$/);
+  assert.equal(screenshot.sha256, require('node:crypto').createHash('sha256').update(screenshotPng).digest('hex'));
+  assert.deepEqual(fs.readFileSync(path.join(options.outputDir, screenshot.path)), screenshotPng);
+  assert.equal(collected.totalBytes, screenshotPng.length);
+});
+
+test('screenshot capture rejects symlinks, directories, malformed magic and mismatched extensions', (t) => {
+  const options = setup(t);
+  const directory = path.join(options.cwd, 'evidence');
+  fs.mkdirSync(directory);
+  fs.writeFileSync(path.join(options.cwd, 'secret.png'), screenshotPng);
+  fs.symlinkSync(path.join(options.cwd, 'secret.png'), path.join(directory, 'linked.png'));
+  fs.mkdirSync(path.join(directory, 'nested.png'));
+  fs.writeFileSync(path.join(directory, 'fake.png'), 'not an image');
+  fs.writeFileSync(path.join(directory, 'wrong.jpg'), screenshotPng);
+  fs.writeFileSync(path.join(directory, 'empty.png'), '');
+  const result = collectScreenshots(directory, options.outputDir, { revision: 'revision', checkId: 'ui' });
+  assert.deepEqual(result.screenshots, []);
+  assert.equal(result.limitations.length, 5);
+  assert.match(result.limitations.join('\n'), /nonregular|signature/);
+  assert.equal(fs.existsSync(path.join(options.outputDir, 'screenshots')), false);
+});
+
+test('screenshot byte, pixel and count limits reject oversized evidence before artifact publication', (t) => {
+  const options = setup(t);
+  const directory = path.join(options.cwd, 'evidence');
+  fs.mkdirSync(directory);
+  fs.writeFileSync(path.join(directory, 'huge.png'), Buffer.alloc(2 * 1024 * 1024 + 1));
+  const inflated = Buffer.from(screenshotPng);
+  inflated.writeUInt32BE(10000, 16);
+  inflated.writeUInt32BE(10000, 20);
+  fs.writeFileSync(path.join(directory, 'pixels.png'), inflated);
+  for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(directory, `state-${i}.png`), screenshotPng);
+  const result = collectScreenshots(directory, options.outputDir, { revision: 'revision', checkId: 'ui' });
+  assert.equal(result.screenshots.length, 4);
+  assert.equal(result.limitations.length, 3);
+  assert.match(result.limitations.join('\n'), /2 MiB|dimensions|budget/);
+  const limited = collectScreenshots(directory, options.outputDir, { revision: 'revision', checkId: 'ui-2', remainingBytes: screenshotPng.length, remainingCount: 1 });
+  assert.equal(limited.screenshots.length, 1);
+  assert.equal(limited.totalBytes, screenshotPng.length);
+});
+
+test('capture directories cannot be replaced with symlinks and excessive entries are bounded', (t) => {
+  const options = setup(t);
+  const directory = path.join(options.cwd, 'evidence');
+  fs.mkdirSync(directory);
+  for (let i = 0; i < 70; i++) fs.writeFileSync(path.join(directory, `text-${i}`), 'not an image');
+  const result = collectScreenshots(directory, options.outputDir, { revision: 'revision', checkId: 'ui' });
+  assert.equal(result.limitations.length, 65);
+  const link = path.join(options.cwd, 'evidence-link');
+  fs.symlinkSync(directory, link);
+  assert.match(collectScreenshots(link, options.outputDir, { revision: 'revision', checkId: 'ui' }).limitations[0], /not a regular directory/);
+});
+
+test('fixture process screenshot requests stay visibly unsupported and do not imply UI verification', async (t) => {
+  const options = setup(t);
+  options.config.execution = { captureScreenshots: true };
+  const run = await executePlan(options);
+  assert.equal(run.results[0].status, 'passed');
+  assert.deepEqual(run.screenshots, []);
+  assert.match(run.screenshotLimitations[0], /container isolation/);
+});
+
+test('screenshot storage is a bounded tmpfs volume kept alive by a separate read-only helper', async (t) => {
+  const options = setup(t);
+  const commands = [];
+  const capture = startScreenshotCapture('reviewed/browser@sha256:abc', {
+    control: args => { commands.push(args); return { status: 0 }; },
+    processRunner: async (command, args, limits) => {
+      commands.push([command, ...args]);
+      assert.equal(command, 'docker');
+      assert.equal(args[0], 'exec');
+      assert.equal(limits.maxOutput, 9 * 1024 * 1024);
+      assert.equal(limits.timeoutMs, 15000);
+      return { exitCode: 0, output: JSON.stringify({ files: [{ name: 'mobile.png', dataBase64: screenshotPng.toString('base64') }], limitations: [] }) };
+    },
+  });
+  assert.deepEqual(commands[0].slice(0, 2), ['volume', 'create']);
+  assert.ok(commands[0].includes('type=tmpfs'));
+  assert.ok(commands[0].includes('o=size=8m,nr_inodes=128,uid=1000,gid=1000,mode=0777'));
+  assert.equal(commands[1][0], 'run');
+  assert.ok(commands[1].includes('--network=none'));
+  assert.ok(commands[1].includes('--user=1000:1000'));
+  assert.ok(commands[1].includes('--read-only'));
+  const mounts = commands[1].filter(value => value.startsWith('type='));
+  assert.equal(mounts.length, 1);
+  assert.match(mounts[0], /^type=volume,src=qa-screenshots-[a-f0-9]+,dst=\/qa-evidence,readonly,volume-nocopy$/);
+  assert.match(capture.mount[1], /^type=volume,src=qa-screenshots-[a-f0-9]+,dst=\/qa-evidence,volume-nocopy$/);
+  assert.equal(commands[1].some(value => value.includes('ulimit') || value.includes('/workspace')), false);
+  const collected = await capture.collect(options.outputDir, { revision: 'revision', checkId: 'ui' });
+  assert.equal(collected.screenshots.length, 1);
+  assert.deepEqual(collected.limitations, []);
+  assert.equal(capture.cleanup(), true);
+  assert.deepEqual(commands.at(-2).slice(0, 2), ['rm', '-f']);
+  assert.deepEqual(commands.at(-1).slice(0, 3), ['volume', 'rm', '-f']);
+  const count = commands.length;
+  capture.cleanup();
+  assert.equal(commands.length, count);
+});
+
+test('screenshot helper startup failure still removes its container and volume', () => {
+  const commands = [];
+  assert.throws(() => startScreenshotCapture('reviewed/browser', {
+    control: args => { commands.push(args); return { status: args[0] === 'run' ? 1 : 0 }; },
+  }), /trusted screenshot reader/);
+  assert.deepEqual(commands.at(-2).slice(0, 2), ['rm', '-f']);
+  assert.deepEqual(commands.at(-1).slice(0, 3), ['volume', 'rm', '-f']);
+});
+
+test('screenshot reader errors and malformed file data remain limitations, never visual evidence', async (t) => {
+  const options = setup(t);
+  for (const result of [
+    { exitCode: 0, output: 'not JSON' },
+    { exitCode: 0, output: '{}', overflow: true },
+    { exitCode: 1, output: '' },
+    { exitCode: 0, output: JSON.stringify({ files: [{ name: '../outside.png', dataBase64: screenshotPng.toString('base64') }], limitations: [] }) },
+    { exitCode: 0, output: JSON.stringify({ files: [{ name: 'fake.png', dataBase64: Buffer.from('not an image').toString('base64') }], limitations: [] }) },
+  ]) {
+    const capture = startScreenshotCapture('reviewed/browser', { control: () => ({ status: 0 }), processRunner: async () => result });
+    try {
+      const collected = await capture.collect(options.outputDir, { revision: 'revision', checkId: 'ui' });
+      assert.deepEqual(collected.screenshots, []);
+      assert.ok(collected.limitations.length > 0);
+    } finally { capture.cleanup(); }
+  }
 });

@@ -1,5 +1,6 @@
 // Reports describe structured results; free-form summaries never decide QA status.
 const { deriveOutcome } = require('./core.js');
+const { renderAIReview } = require('./ai/pipeline');
 
 const value = (v) => v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
 const cell = (v) => value(v).replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -121,7 +122,7 @@ function renderReport(input) {
     '## Skipped, blocked, or untested areas',
     list([
       ...results.filter((r) => !['passed', 'failed'].includes(r.status)).map((r) => `${r.checkId}: ${r.status}${r.details ? ` — ${value(r.details)}` : ''}`),
-      ...checks.filter((c) => !results.some((r) => r.checkId === c.id)).map((c) => `${c.id}: ${c.method === 'human' || c.type === 'human' ? 'human decision (see below)' : 'no execution result recorded'}`),
+      ...checks.filter((c) => !results.some((r) => r.checkId === c.id)).map((c) => `${c.id}: ${c.method === 'human' || c.type === 'human' ? 'human decision (see below)' : c.method === 'analysis' ? `AI review ${c.analysisStatus}; not an automated test` : 'no execution result recorded'}`),
     ]), '',
     '## Human questions and decisions',
     list(checks.filter((c) => c.method === 'human' || c.type === 'human' || c.question).map((c) => `${c.id}: ${c.question || c.expected || c.reason}`)), '',
@@ -129,6 +130,7 @@ function renderReport(input) {
     '| --- | --- | --- | --- | --- | --- | --- |',
     ...decisions.map((d) => `| ${cell(d.checkId)} | ${cell(d.decision || d.status || d.result)} | ${cell(d.responder)} | ${cell(d.explanation)} | ${cell(d.timestamp || d.createdAt)} | ${cell(d.revision)} | ${decisionApplicability(d, run)} |`), '',
     '## Previous execution attempts', ...runHistory(run), '',
+    ...(run.ai ? [renderAIReview(run.ai), ''] : []),
     '## Remaining limitations',
     list([...(plan.gaps || []), ...(run.limitations || []), ...(run.outcome.pending || []).map((c) => `Required check remains ${c.status}: ${c.id || c.checkId}`)]), '',
     'Outcome is calculated from structured results and applicable decisions. Report availability is independent of QA outcome.', '',

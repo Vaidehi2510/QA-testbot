@@ -25,6 +25,7 @@ function planMessage(pr, plan, changed = false) {
 function completionMessage(run) {
   const outcome = deriveOutcome(run.plan || { checks: [] }, run.results || [], run.decisions || [], run.revision);
   const humanPending = (outcome.pending || []).filter((check) => check.method === 'human' && check.status === 'awaiting_human');
+  const aiPending = (outcome.pending || []).some(check => check.method === 'analysis' && check.status === 'blocked');
   const lines = [
     `*QA result* — ${link(run.pr.url, `#${run.pr.number} ${run.pr.title}`)}`,
     `Repository: ${escape(run.repository)} · revision: ${escape(run.revision)}`,
@@ -33,6 +34,13 @@ function completionMessage(run) {
     `Checks: ${Object.entries(outcome.counts || {}).map(([status, count]) => `${count} ${status.replace(/_/g, ' ')}`).join(', ')}`,
     testCountSummary(run.results || []),
   ];
+  if (aiPending) lines.push('Automated testing has finished; AI final review is pending. Test outcomes above remain authoritative.');
+  if (run.ai) {
+    const reviews = [run.ai.planning, run.ai.completion].filter(Boolean);
+    const findings = reviews.flatMap(review => review.findings || []);
+    lines.push(`AI review: ${reviews.map(review => `${escape(review.stage)} ${escape(review.status)}`).join(', ') || 'pending'}; ${findings.length} proposed findings.`);
+    for (const finding of findings.slice(0, 3)) lines.push(`AI ${escape(finding.severity)}: ${brief(finding.title)} (${escape(finding.file)}). Suggested fix: ${brief(finding.suggestedFix)}`);
+  }
   const issues = (outcome.checkResults || []).filter((r) => ['failed', 'execution_error', 'blocked', 'skipped'].includes(r.status));
   for (const issue of issues.slice(0, 4)) {
     const result = (run.results || []).find((r) => r.checkId === issue.checkId);

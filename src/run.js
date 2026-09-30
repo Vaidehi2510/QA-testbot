@@ -10,6 +10,8 @@ const { dispatchExecution } = require('./dispatch');
 const { DriveAdapter } = require('./drive');
 const { SlackAdapter, completionMessage, requestMessage } = require('./slack');
 const { renderReport } = require('./report');
+const { OpenRouterClient } = require('./ai/openrouter');
+const { addReviewGate, reviewStage, applyAssessment } = require('./ai/pipeline');
 
 function executionRequest(run, config) {
   return { plan: run.plan, config, metadata: { repository: run.repository, prNumber: run.pr.number,
@@ -18,7 +20,7 @@ function executionRequest(run, config) {
 
 // Dependencies are injected so the same state machine runs in offline integration tests.
 async function reconcile({ state, save, config, rules, people, prs, workflows = [], integrations, dryRun = false,
-  rerunToken = '', prNumber, retryIntegrations = false, log = console.log }) {
+  rerunToken = '', prNumber, retryIntegrations = false, log = console.log, skipAICompletion = false }) {
   if (dryRun) { state = structuredClone(state); save = async () => {}; }
   if (retryIntegrations && !dryRun) for (const e of Object.values(state.effects)) {
     if (e.status === 'exhausted') { e.status = 'pending'; e.attempts = 0; delete e.nextAttemptAt; }
@@ -27,7 +29,7 @@ async function reconcile({ state, save, config, rules, people, prs, workflows = 
     if (run.collectionExhausted) { run.collectionAttempts = {}; run.collectionExhausted = false; run.resultCollectionPending = true; }
   }
   for (const pr of prs) {
-    const plan = generatePlan(pr, rules, config);
+    const plan = addReviewGate(generatePlan(pr, rules, config), config, pr.revision);
     // A one-time rerun must remain current when the next scheduled poll omits its token.
     const previous = state.runs[state.prs[`${pr.repository}#${pr.number}`]?.currentRunKey];
     const applicableToken = !prNumber || Number(prNumber) === pr.number ? rerunToken : '';
@@ -37,10 +39,13 @@ async function reconcile({ state, save, config, rules, people, prs, workflows = 
     // A historical token must not restore an older run; process the actual current run.
     const current = state.runs[state.prs[`${pr.repository}#${pr.number}`].currentRunKey];
     ingestDecisions(state, current, pr.comments || [], config);
-    if (created) {
-      run.request = executionRequest(run, config);
-      queueEffect(state, `${run.key}:dispatch`, 'dispatch', run.key);
-      queueEffect(state, `${run.key}:plan`, 'plan', run.key);
+    if (config.ai?.enabled && !current.request && current.phase === 'queued') {
+      await invokeReview({ run: current, pr, config, integrations, stage: 'planning', save: () => save(state), dryRun });
+    }
+    if (created || (current.phase === 'queued' && !current.request)) {
+      current.request = executionRequest(current, config);
+      queueEffect(state, `${current.key}:dispatch`, 'dispatch', current.key);
+      queueEffect(state, `${current.key}:plan`, 'plan', current.key);
       log(`QA assessment ${pr.repository}#${pr.number} @ ${pr.revision.slice(0, 12)}: ${plan.checks.length} checks`);
     }
   }
@@ -56,6 +61,11 @@ async function reconcile({ state, save, config, rules, people, prs, workflows = 
         archiveCompletion(run);
         run.phase = 'running'; run.results = []; run.actionsAttempt = Number(workflow.run_attempt);
         run.attemptStartedAt = workflow.run_started_at || new Date().toISOString();
+        if (run.ai) {
+          delete run.ai.completion;
+          const gate = run.plan.checks.find(check => check.id === 'ai-team-review');
+          if (gate) gate.analysisStatus = 'blocked';
+        }
         run.outcome = deriveOutcome(run.plan, [], run.decisions, run.revision);
       }
       continue;
@@ -92,7 +102,7 @@ async function reconcile({ state, save, config, rules, people, prs, workflows = 
     let current = isCurrent(state, run);
     // Check the live head immediately before publishing. Commit status is also SHA-bound.
     if (current && integrations.currentRevision) current = await integrations.currentRevision(run) === run.revision;
-    const version = digest([run.results, run.decisions, run.phase, run.actionsAttempt]);
+    const version = digest([run.results, run.decisions, run.phase, run.actionsAttempt, run.plan.checks, run.ai?.planning?.status, run.ai?.completion?.status]);
     const reportVersion = digest([version, run.supersededAt, (run.completionHistory || []).map(h =>
       [h.event, h.snapshot?.report.status, h.snapshot?.report.url])]);
     if (current) {
@@ -152,8 +162,47 @@ async function reconcile({ state, save, config, rules, people, prs, workflows = 
       return result;
     });
   }
+  // The initial completion has already been sent before potentially slow model
+  // calls. A final review produces a separate factual update and revised report.
+  let reviewed = false;
+  if (config.ai?.enabled && !skipAICompletion && !dryRun) for (const run of orderedRuns) {
+    if (!isCurrent(state, run) || run.phase !== 'completed') continue;
+    const pr = prs.find(pr => pr.repository === run.repository && pr.number === run.pr.number && pr.revision === run.revision);
+    if (!pr) continue;
+    const analysisKey = `completion:${digest([run.completionEvent, run.results])}`;
+    if (run.ai?.completion?.analysisKey === analysisKey && run.ai.completion.status !== 'running' && run.ai.completion.applied) continue;
+    if (run.screenshots?.length && !run.reviewScreenshots && integrations.readImages) {
+      try { Object.defineProperty(run, 'reviewScreenshots', { value: await integrations.readImages(run), enumerable: false, configurable: true, writable: true }); }
+      catch { run.screenshotLimitations = [...(run.screenshotLimitations || []), 'Could not reload screenshot evidence after a controller restart.']; }
+    }
+    const evidencePr = { ...pr, screenshots: run.reviewScreenshots || pr.screenshots || [], aiLimitations: [...(pr.aiLimitations || []), ...(run.screenshotLimitations || [])] };
+    await invokeReview({ run, pr: evidencePr, config, integrations, stage: 'completion', save: () => save(state), dryRun });
+    reviewed = true;
+  }
   await save(state);
+  if (reviewed) return reconcile({ state, save, config, rules, people, prs, workflows: [], integrations, dryRun,
+    rerunToken: '', log, skipAICompletion: true });
   return state;
+}
+
+async function invokeReview({ run, pr, config, integrations, stage, save, dryRun }) {
+  try {
+    return await reviewStage({ run, pr, config, client: integrations.ai, stage, save, dryRun,
+      ...(integrations.aiTeam ? { team: integrations.aiTeam } : {}) });
+  } catch (error) {
+    if (dryRun) return;
+    run.ai ||= {};
+    const previous = run.ai[stage] || run.ai.latest || {};
+    const assessment = { ...previous, stage, revision: run.revision, status: 'error',
+      analysisKey: stage === 'planning' ? `planning:${run.plan.fingerprint}` : `completion:${digest([run.completionEvent, run.results])}`,
+      findings: [], questions: [], candidates: [], selectedRunnerIds: [], roles: [],
+      limitations: ['AI review did not finish. Check model configuration, API access, and the review budget.'], errorCode: error.code || 'AI_REVIEW_ERROR' };
+    run.ai[stage] = assessment; run.ai.latest = assessment;
+    applyAssessment(run, assessment, config, stage);
+    assessment.applied = true;
+    await save();
+    return assessment;
+  }
 }
 
 async function main(env = process.env) {
@@ -195,10 +244,11 @@ async function main(env = process.env) {
       accessToken: env.GOOGLE_DRIVE_ACCESS_TOKEN || env.GOOGLE_ACCESS_TOKEN, dryRun, onCheckpoint: () => save(state) });
     const slack = new SlackAdapter({ webhookUrl: env.SLACK_WEBHOOK_URL, botToken: env.SLACK_BOT_TOKEN, channelId: env.SLACK_CHANNEL_ID, dryRun });
     const integrations = {
-      drive, slack,
+      drive, slack, ai: new OpenRouterClient({ apiKey: env.OPENROUTER_API_KEY, dryRun, timeoutMs: 20000, maxRetries: 0 }),
       putRequest: (key, request) => store.putRequest(key, request),
       dispatch: key => dispatchExecution({ gh: bot, owner, repo, requestKey: key, ref: config.executionRef, dryRun, enabled }),
       readResults: (workflow, key) => github.readResultsArtifact(bot, owner, repo, workflow, key),
+      readImages: run => github.readRunScreenshots(bot, owner, repo, run),
       currentRevision: async run => run.repository === `${target.owner}/${target.repo}`
         ? (await gh.rest.pulls.get({ ...target, pull_number: run.pr.number })).data.head.sha : null,
       plan: run => github.upsertComment(gh, target.owner, target.repo, run.pr.number, '<!-- qa-plan:auto -->', `${run.plan.markdown}\n\nTested revision: \`${run.revision}\`.\nHuman responses: \`/qa-tested check:<id> revision:${run.revision} result:pass|fail reason:<explanation>\`.`, { dryRun }),

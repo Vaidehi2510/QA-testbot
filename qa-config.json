@@ -13,6 +13,22 @@
   "maxIntegrationAttempts": 5,
   "dispatchTimeoutMinutes": 45,
   "drive": { "folderId": "", "sharedDriveId": "" },
+  "ai": {
+    "enabled": false,
+    "model": "",
+    "roleModels": {},
+    "roles": ["planner", "code-review", "security", "ui-ux", "triage"],
+    "requireReview": true,
+    "maxToolRounds": 3,
+    "maxCallsPerRun": 20,
+    "maxInputChars": 100000,
+    "maxOutputTokens": 3000,
+    "maxCostUsd": 2,
+    "includePaths": ["**"],
+    "excludePaths": [],
+    "allowImages": false,
+    "provider": { "data_collection": "deny", "allow_fallbacks": false, "require_parameters": true }
+  },
   "runners": [
     {
       "id": "node-tests",

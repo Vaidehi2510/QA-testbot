@@ -1,12 +1,15 @@
 {
   "name": "qa-signoff-bot",
-  "version": "1.0.0",
-  "description": "Deterministic PR QA planning, isolated test execution, Drive reports, and targeted Slack decisions.",
+  "version": "1.1.0",
+  "description": "OpenRouter AI QA team with evidence-based test execution, model selection, Drive reports, and targeted Slack decisions.",
   "license": "MIT",
   "private": true,
   "engines": { "node": ">=22.17" },
   "scripts": {
     "demo": "node src/demo.js",
+    "demo:ai": "node src/ai/demo.js",
+    "dashboard": "node src/dashboard.js",
+    "review": "node src/ai/review.js",
     "sync": "node src/run.js",
     "test": "node --test test/*.test.js",
     "execute": "node src/execute.js"

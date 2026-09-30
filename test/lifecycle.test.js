@@ -80,6 +80,14 @@ test('same completion is idempotent and a later Actions attempt retains history'
   completeRun(state, run.key, report(run), workflow);
   assert.equal(run.outcome.status, 'failed');
 });
+test('malformed result records become execution errors instead of crashing collection', () => {
+  for (const result of [null, false, 'passed', []]) {
+    const { state, run } = fixture();
+    completeRun(state, run.key, report(run, { results: [result] }), workflow);
+    assert.equal(run.outcome.status, 'execution_error');
+    assert.match(run.results[0].details, /Invalid result schema/);
+  }
+});
 test('unauthorized, stale and reused decisions are not applied', () => {
   const { state, run } = fixture({ checks: [...plan.checks, { id: 'question', method: 'human', kind: 'requirement' }] });
   const body = `/qa-tested check:question revision:${revision} result:pass reason:Documented expected threshold`;
