@@ -13,7 +13,7 @@ async function fixture(t, options = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-dashboard-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const configPath = path.join(directory, 'qa-config.json'), statePath = path.join(directory, 'state.json');
-  const base = { enabled: false, runners: [{ id: 'trusted-tests' }], drive: { folderId: 'preserved' }, customOption: 'preserved' };
+  const base = { enabled: false, runners: [{ id: 'trusted-tests' }], drive: { folderId: 'preserved' }, customOption: 'preserved', ...(options.initialAI ? { ai: options.initialAI } : {}) };
   await fs.writeFile(configPath, JSON.stringify(base));
   let catalogCalls = 0;
   const server = createDashboard({ configPath, statePath, apiKey: 'test-secret-never-exposed',
@@ -140,4 +140,73 @@ test('run history projects evidence and AI reviews without unrelated durable sta
   assert.equal(response.json.runs[1].outcome.status, 'blocked');
   assert.equal(response.json.runs[0].ai.completion.findings[0].title, '<script>alert(1)</script>');
   assert.doesNotMatch(response.text, /do-not-expose/);
+});
+
+const localProfile = { id: 'local-reviewer:latest', contextLength: 32768, tools: true, vision: false };
+const localAI = { ...DEFAULT_AI_CONFIG, backend: 'local', local: { baseUrl: 'http://127.0.0.1:11434/v1', models: [localProfile] } };
+test('local settings save offline using explicit profiles without contacting any model provider', async t => {
+  let factoryCalls = 0;
+  const f = await fixture(t, { clientFactory: () => { factoryCalls++; throw new Error('offline secret'); }, localApiKey: '' });
+  const ai = { ...localAI, enabled: true, model: localProfile.id };
+  const response = await f.request('/api/settings', { method: 'PUT', headers: await f.authorization(), body: { ai } });
+  assert.equal(response.status, 200); assert.equal(factoryCalls, 0); assert.equal(f.catalogCalls(), 0);
+  assert.equal(response.json.credentialConfigured, false); assert.equal(response.json.credentialRequired, false);
+  assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')), { ...f.base, ai });
+});
+test('catalog follows saved backend and keeps local credential state separate from OpenRouter', async t => {
+  const calls = [];
+  const f = await fixture(t, { initialAI: localAI, apiKey: '', localApiKey: 'local-only-private', clientFactory: options => {
+    calls.push(options); return { listModels: async () => [{ ...model, id: localProfile.id, backend: 'local' }] };
+  } });
+  const settings = await f.settings();
+  assert.equal(settings.credentialConfigured, true); assert.equal(settings.credentialRequired, false);
+  assert.deepEqual(settings.credentials, { local: true, openrouter: false });
+  assert.ok(!JSON.stringify(settings).includes('local-only-private'));
+  const result = await f.request('/api/models');
+  assert.equal(result.status, 200); assert.equal(result.json.backend, 'local');
+  assert.equal(result.json.models[0].id, localProfile.id); assert.equal(f.catalogCalls(), 0);
+  assert.equal(calls[0].ai.backend, 'local'); assert.equal(calls[0].env.LOCAL_MODEL_API_KEY, 'local-only-private');
+});
+test('draft catalog preview requires CSRF and validates loopback endpoints before creating clients', async t => {
+  let factoryCalls = 0;
+  const f = await fixture(t, { clientFactory: () => { factoryCalls++; return { listModels: async () => [] }; } });
+  const headers = await f.authorization();
+  const preview = ai => f.request('/api/models', { method: 'POST', headers, body: { ai } });
+  assert.equal((await f.request('/api/models', { method: 'POST', body: { ai: { backend: 'local', local: localAI.local } } })).status, 403);
+  for (const baseUrl of ['https://evil.example/v1', 'http://localhost:11434/v1', 'http://127.1:11434/v1', 'http://127.0.0.1:11434/v1?secret=1', 'http://127.0.0.1:11434/admin', 'http://user:password@127.0.0.1/v1']) {
+    assert.equal((await preview({ backend: 'local', local: { baseUrl, models: [] } })).status, 400);
+  }
+  assert.equal((await preview({ backend: 'local', local: localAI.local, apiKey: 'do-not-store' })).status, 400);
+  assert.equal((await preview({ backend: 'local', local: { ...localAI.local, apiKey: 'do-not-store' } })).status, 400);
+  assert.equal(factoryCalls, 0);
+  const response = await preview({ backend: 'local', local: localAI.local });
+  assert.equal(response.status, 200); assert.equal(factoryCalls, 1); assert.equal(f.catalogCalls(), 0);
+  assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')), f.base);
+});
+test('draft catalogs cache separately across backend, endpoint and capability profiles', async t => {
+  const seen = [];
+  const f = await fixture(t, { clientFactory: ({ ai }) => ({ listModels: async () => { seen.push(ai); return [{ id: ai.local.models[0]?.id || 'unprofiled' }]; } }) });
+  const headers = await f.authorization();
+  const preview = local => f.request('/api/models', { method: 'POST', headers, body: { ai: { backend: 'local', local } } });
+  await f.request('/api/models'); await preview(localAI.local); await preview(localAI.local);
+  await preview({ ...localAI.local, baseUrl: 'http://127.0.0.1:1234/v1' });
+  await preview({ ...localAI.local, models: [{ ...localProfile, vision: true }] });
+  assert.equal(seen.length, 3); assert.equal(f.catalogCalls(), 1);
+  assert.equal((await f.settings()).ai.backend, 'openrouter');
+});
+test('offline local catalogs report local recovery steps and never fall back to OpenRouter', async t => {
+  const f = await fixture(t, { initialAI: localAI, clientFactory: () => ({ listModels: async () => { throw new Error('private local key'); } }) });
+  const response = await f.request('/api/models');
+  assert.equal(response.status, 503); assert.match(response.text, /Local model server/); assert.match(response.text, /still save/);
+  assert.doesNotMatch(response.text, /private local key/); assert.equal(f.catalogCalls(), 0);
+});
+test('local models require explicit tools and screenshot capability declarations before assignment', async t => {
+  const f = await fixture(t), headers = await f.authorization();
+  for (const ai of [
+    { ...localAI, enabled: true, model: 'unknown-model' },
+    { ...localAI, model: localProfile.id, local: { ...localAI.local, models: [{ ...localProfile, tools: false }] } },
+    { ...localAI, enabled: true, model: localProfile.id, allowImages: true },
+    { ...localAI, local: { ...localAI.local, models: [{ id: 'unconfirmed', contextLength: 32768 }] } },
+  ]) assert.equal((await f.request('/api/settings', { method: 'PUT', headers, body: { ai } })).status, 400);
+  assert.equal(f.catalogCalls(), 0); assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')), f.base);
 });

@@ -2,11 +2,11 @@
   {
     "id": "ui",
     "label": "UI / Frontend",
-    "match": ["\\.tsx$", "\\.jsx$", "^frontend/", "/components/", "\\.css$"],
+    "match": ["\\.(tsx|jsx|css|scss|html|vue|svelte)$", "^frontend/", "/components/"],
     "journeys": ["Open the affected screen, complete its primary action, and recover from invalid input"],
     "checks": [
       {"id": "interaction", "runner": "ui-tests", "reason": "Changed UI can alter navigation and form interaction.", "expected": "Configured interaction assertions pass, including invalid input and keyboard navigation.", "requirement": "Target application's UI acceptance specifications"},
-      {"id": "visual", "method": "human", "kind": "subjective", "match": ["\\.css$", "\\.scss$"], "reason": "Subjective appearance requires a design judgment.", "expected": "The changed layout satisfies the intended design at agreed viewport sizes.", "question": "Does the changed layout satisfy the intended design on desktop and mobile, with readable content and no clipped controls? Cite screenshots and the design requirement."}
+      {"id": "visual", "runner": "ui-tests", "match": ["\\.css$", "\\.scss$"], "reason": "Style changes need automated layout, accessibility, and visual evidence at configured viewport sizes.", "expected": "Configured browser checks pass without layout overflow, broken assets, or detected accessibility violations; the AI reviewer receives revision-bound screenshots when enabled.", "requirement": "Trusted browser suite and target application's UI acceptance specifications"}
     ]
   },
   {

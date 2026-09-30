@@ -9,8 +9,8 @@ const { upsertComment, updateLabels, readResultsArtifact, readRunScreenshots, ge
 
 test('GitHub mutations are fully suppressed in dry-run', async () => {
   const gh = new Proxy({}, { get: () => { throw new Error('Unexpected API access'); } });
-  assert.equal((await upsertComment(gh, 'o', 'r', 1, '<!--qa-->', 'text', { dryRun: true })).status, 'preview');
-  assert.equal((await updateLabels(gh, 'o', 'r', 1, { status: 'passed' }, { completeLabel: 'done' }, { dryRun: true })).want, 'done');
+  assert.equal((await upsertComment(gh, 'o', 'r', 1, '<!--qa-->', 'text', { dryRun: true, targetAccess: 'report-status' })).status, 'preview');
+  assert.equal((await updateLabels(gh, 'o', 'r', 1, { status: 'passed' }, { completeLabel: 'done', targetAccess: 'report-status' }, { dryRun: true })).want, 'done');
 });
 test('a user marker cannot redirect updates into a human comment', async () => {
   const calls = [];
@@ -18,7 +18,7 @@ test('a user marker cannot redirect updates into a human comment', async () => {
     listComments: () => {}, updateComment: async () => { throw new Error('Should not edit a user comment'); },
     createComment: async body => { calls.push(body); return { data: { id: 2 } }; },
   } } };
-  assert.equal((await upsertComment(gh, 'o', 'r', 1, '<!--qa-->', 'plan')).id, 2);
+  assert.equal((await upsertComment(gh, 'o', 'r', 1, '<!--qa-->', 'plan', { targetAccess: 'report-status' })).id, 2);
   assert.equal(calls.length, 1);
 });
 test('collector selects only the exact Actions attempt and reads JSON without extraction', async t => {

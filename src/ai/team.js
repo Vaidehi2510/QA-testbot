@@ -7,7 +7,7 @@ const ROLES = {
   planner: 'Plan regression and boundary tests against stated requirements. Select only trusted runner IDs, identify coverage gaps, and propose test code with cited requirements. Ask a precise question when intended behavior is missing.',
   'code-review': 'Inspect final changed source and relevant callers/tests. Find concrete correctness and integration defects. Explain a reproducible failure and a focused suggested fix supported by cited code.',
   security: 'Inspect authentication, authorization, trust boundaries, injection, secret handling, and data exposure relevant to changed code. Cite concrete code paths, prerequisites, and a focused mitigation; do not claim a complete security audit.',
-  'ui-ux': 'Inspect UI components, loading/empty/error states, keyboard and screen-reader semantics, responsive assumptions, and user journeys. Review supplied screenshots when present. Label code-only observations as such; never claim a browser, accessibility audit, or visual test ran.',
+  'ui-ux': 'Inspect UI components, loading/empty/error states, keyboard and screen-reader semantics, responsive assumptions, and user journeys. Review supplied screenshots and actual browser test evidence when present. Suggest focused UI improvements, labeling optional enhancements as low-severity proposals rather than confirmed bugs. Label code-only observations as such; never claim an audit or interaction ran without its actual executor evidence.',
   triage: 'Inspect actual executor results and final code. Explain failures, distinguish application bugs from execution errors, propose regression tests and focused fixes, and state untested behavior. Never reinterpret a failure as a passing test.',
 };
 const uniq = (values) => [...new Set(values.filter(Boolean))];
@@ -91,6 +91,7 @@ async function runTeam({ pr, plan = {}, config = {}, client, context: suppliedCo
   if (!['planning', 'completion'].includes(stage)) throw new Error('AI review stage must be planning or completion.');
   const ai = { ...DEFAULT_AI_CONFIG, ...config };
   const context = suppliedContext || createContext(pr, ai);
+  if (ai.backend === 'local') context.limitations.push('Local inference has no tracked provider charge; hardware, hosting, and electricity costs are not measured. The configured model server controls where inference runs.');
   for (const check of plan.checks || []) context.requirementSources.add(check.id);
   const key = analysisKey || `${stage}:${plan.fingerprint || pr.revision}`;
   const sameRevision = prior?.revision === pr.revision;
@@ -121,10 +122,10 @@ async function runTeam({ pr, plan = {}, config = {}, client, context: suppliedCo
   }
   let catalog;
   try {
-    if (!client?.chat || !client?.listModels) throw new Error('An OpenRouter client with catalog access is required.');
+    if (!client?.chat || !client?.listModels) throw new Error('A model client with catalog access is required.');
     const response = await client.listModels();
     catalog = Array.isArray(response) ? response : response.models || response.data;
-    if (!Array.isArray(catalog)) throw new Error('OpenRouter model catalog is unavailable.');
+    if (!Array.isArray(catalog)) throw new Error('The selected backend model catalog is unavailable.');
   } catch (error) {
     assessment.status = 'error'; assessment.limitations.push(`AI provider/catalog unavailable: ${context.sanitize(error.message).slice(0, 500)}`);
     await checkpoint(); return collect();

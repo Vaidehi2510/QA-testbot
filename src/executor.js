@@ -320,6 +320,7 @@ async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mod
   fs.mkdirSync(path.join(outputDir, 'logs'), { recursive: true });
   const image = config.execution?.image || DEFAULT_IMAGE;
   const captureScreenshots = config.execution?.captureScreenshots === true;
+  const webChecks = plan.checks.some(check => check.method === 'automated' && config.runners.some(runner => runner.id === check.runner && runner.type === 'web-preview'));
   if (config.execution?.captureScreenshots !== undefined && typeof config.execution.captureScreenshots !== 'boolean') throw new Error('execution.captureScreenshots must be boolean.');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/@-]+$/.test(image)) throw new Error('Invalid container image.');
   const envelope = {
@@ -328,7 +329,7 @@ async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mod
     runId: metadata.runId, attempt: metadata.attempt,
     ...(metadata.actionsRunId ? { actionsRunId: String(metadata.actionsRunId), actionsAttempt: Number(metadata.actionsAttempt || 1) } : {}),
     startedAt: new Date().toISOString(), execution: { isolation: mode, image: mode === 'container' ? image : null, fixture: metadata.fixture === true }, results: [],
-    ...(captureScreenshots ? { screenshots: [], screenshotLimitations: [] } : {}),
+    ...(captureScreenshots || webChecks ? { screenshots: [], screenshotLimitations: [] } : {}),
   };
   let screenshotBytes = 0;
   if (captureScreenshots && mode !== 'container') envelope.screenshotLimitations.push('Automatic screenshot capture requires container isolation.');
@@ -342,6 +343,28 @@ async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mod
     try {
       const runner = config.runners.find((item) => item.id === check.runner);
       if (!runner) throw new Error(`Unknown trusted runner: ${check.runner}`);
+      if (runner.type === 'web-preview') {
+        const { executeWebCheck } = require('./web/execute');
+        const webDir = path.join(outputDir, 'web', crypto.createHash('sha256').update(check.id).digest('hex').slice(0, 20));
+        const evidence = await executeWebCheck({ suite: runner.suite, metadata: { ...metadata, revision }, outputDir: webDir, checkId: check.id, timeoutMs: runner.timeoutMs });
+        Object.assign(result, evidence.result, { execution: 'sandboxed-browser-preview' });
+        result.evidence = (result.evidence || []).map(item => ({ ...item, path: path.relative(outputDir, path.join(webDir, item.path)).split(path.sep).join('/') }));
+        for (const item of evidence.screenshots || []) {
+          const source = path.join(webDir, item.path);
+          const size = fs.statSync(source).size;
+          if (envelope.screenshots.length >= MAX_SCREENSHOTS || screenshotBytes + size > MAX_SCREENSHOT_TOTAL_BYTES) { envelope.screenshotLimitations.push('Additional browser screenshots exceed the shared image budget.'); continue; }
+          fs.mkdirSync(path.join(outputDir, 'screenshots'), { recursive: true });
+          fs.copyFileSync(source, path.join(outputDir, item.path));
+          envelope.screenshots.push(item); screenshotBytes += size;
+        }
+        envelope.screenshotLimitations.push(...(evidence.limitations || []));
+        // Images are copied into the common artifact only once; keep the bounded
+        // textual browser evidence under web/, without duplicate image payloads.
+        fs.rmSync(path.join(webDir, 'screenshots'), { recursive: true, force: true });
+        fs.rmSync(path.join(webDir, 'web-result.json'), { force: true });
+        envelope.execution.browserPreview = true;
+        continue;
+      }
       const command = runnerCommand(runner, cwd);
       const timeoutMs = Math.min(10 * 60 * 1000, Math.max(20, Number(runner.timeoutMs) || 60000));
       let run;
@@ -385,9 +408,9 @@ async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mod
       result.details = error.message;
     } finally {
       if (screenshotCapture && !screenshotCapture.cleanup()) envelope.screenshotLimitations.push('Screenshot volume cleanup failed; discard this ephemeral runner after execution.');
+      result.durationMs = Date.now() - started;
+      envelope.results.push(result);
     }
-    result.durationMs = Date.now() - started;
-    envelope.results.push(result);
   }
   envelope.completedAt = new Date().toISOString();
   const temporary = path.join(outputDir, 'results.json.tmp');

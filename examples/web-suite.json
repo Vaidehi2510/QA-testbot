@@ -1,0 +1,14 @@
+{
+  "targetEnvironment": "preview",
+  "url": "http://127.0.0.1:3000",
+  "revisionHeader": "x-qa-revision",
+  "pages": ["/"],
+  "viewports": [
+    { "name": "desktop", "width": 1440, "height": 900 },
+    { "name": "mobile", "width": 390, "height": 844 }
+  ],
+  "allowedOrigins": [],
+  "allowMutations": false,
+  "timeoutMs": 15000,
+  "journeys": []
+}

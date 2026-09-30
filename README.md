@@ -1,8 +1,10 @@
 # Automated PR QA bot
 
-A standalone QA bot with an optional **OpenRouter AI team**: browse models, assign specialists to test planning, code review, security, UI/UX, and failure triage, then run trusted test suites and report the evidence. A local dashboard manages models and shows findings, suggested fixes, candidate tests, and review costs.
+A standalone QA bot with an optional **OpenRouter or local AI team**: browse models, assign specialists to test planning, code review, security, UI/UX, and failure triage, then run trusted test suites and report the evidence. A local dashboard manages models and shows findings, suggested fixes, candidate tests, and review costs.
 
 The GitHub App controller runs tests in isolated GitHub Actions jobs, saves reports to Google Drive, and asks specific human questions through Slack. Its deterministic workflow remains usable without AI or a paid model service. Platform usage limits and hosting costs still apply.
+
+The bot can comment, label, and report commit statuses on product PRs. It has no tool for editing product files, pushing fixes, or merging. Bot state, external browser suites, candidate tests, and reports stay in its separate workspace. See [testing a product without code changes](docs/product-qa.md).
 
 QA completes when every required check passes and every mandatory question is resolved for the tested revision. There is no participation quota, reviewer coverage table, weekly missing-review report, or routine human sign-off. GitHub approvals alone do not complete QA. The MIT license is retained.
 
@@ -34,7 +36,7 @@ Open **http://127.0.0.1:8787**. Catalog browsing needs no key. Select models, en
 npm run review -- --repo /path/to/product --base main --head HEAD
 ```
 
-This command reviews committed Git revisions and saves a local report; it does not launch tests. Add `--dry-run` to preview without model calls or saved state. See [AI setup and limits](docs/ai.md), [dashboard instructions](docs/dashboard.md), and [test execution](docs/execution.md).
+This command reviews committed Git revisions and saves a local report. Add `--web-suite examples/web-suite.json` to run a bot-owned browser suite against your disposable preview. Configure the suite for your product first. Without that option, the command does not launch tests. Add `--dry-run` to preview without model calls or saved state. See [AI setup and limits](docs/ai.md), [dashboard instructions](docs/dashboard.md), and [test execution](docs/execution.md).
 
 For the live controller's GitHub App client dependencies:
 
@@ -49,7 +51,7 @@ npm ci --ignore-scripts
 ```mermaid
 flowchart LR
     PR[Target PR: SHA, patches, description, specs, tests] --> Plan[Deterministic baseline plan]
-    Plan --> AI[Optional OpenRouter specialists: inspect and select trusted suites]
+    Plan --> AI[Optional AI specialists: inspect and select trusted suites]
     AI --> State[Durable state and execution request]
     State --> Prepare[Separate prepare job: download exact source]
     Prepare --> Test[Secret-free executor: network-isolated container]
@@ -63,9 +65,9 @@ flowchart LR
     Poll[10-minute reconciliation] --> State
 ```
 
-The bot stays in its own repository. The target application needs tests that fit a supported runner and installation of the GitHub App; it needs no bot source, workflow, Slack secret, or Drive credential. New PR revisions and comments are discovered on the ten-minute reconciliation schedule. Test completion uses a **`workflow_run` event**, without waiting for that schedule. Slack completion is sent before Drive I/O; when an upload is pending, a later message supplies its link.
+The bot stays in its own repository. The target application needs a supported test suite or a runnable preview with bot-owned browser checks, and installation of the GitHub App; it needs no bot source, workflow, Slack secret, or Drive credential. New PR revisions and comments are discovered on the ten-minute reconciliation schedule. Test completion uses a **`workflow_run` event**, without waiting for that schedule. Slack completion is sent before Drive I/O; when an upload is pending, a later message supplies its link.
 
-The privileged controller checks out reviewed bot code. A separate prepare job downloads an exact commit archive as data. The executor uses a fresh GitHub-hosted runner and runs PR code in containers with no network, integration credentials, Docker socket, writable source mount, or privileged capabilities. The privileged collector reads bounded JSON and optional validated screenshot bytes from an artifact; it never extracts or executes that artifact's code. See [execution details](docs/execution.md).
+The privileged controller checks out reviewed bot code. A separate prepare job downloads an exact commit archive as data. The executor uses a fresh GitHub-hosted runner and runs PR code in containers with no network, integration credentials, Docker socket, writable source mount, or privileged capabilities. Bot-owned preview tests use a separate bounded browser process with Chromium sandboxing, fresh contexts, and an explicit preview-origin policy; no target scripts are launched by that worker. The privileged collector reads bounded JSON and optional validated screenshot bytes from an artifact; it never extracts or executes that artifact's code. See [execution details](docs/execution.md).
 
 ## Planning and supported tests
 
@@ -79,6 +81,7 @@ Initial runners:
 | --- | --- | --- |
 | `node-test` | Node built-in tests, explicit files or relative globs | TAP produced by `node --test --test-reporter=tap` |
 | `npm-script` | A trusted named npm script running the application's suite | Complete TAP, `format: "tap"` |
+| `web-preview` | Bot-owned UI suite against an exact-revision disposable preview | Structured browser assertions, accessibility/layout findings, and screenshots |
 
 An example additional runner:
 
@@ -95,9 +98,9 @@ An example additional runner:
 }
 ```
 
-The default image supports dependency-free Node tests. Projects with dependencies need a reviewed image containing those dependencies at `/opt/qa/node_modules`. Configure `execution.image`, preferably with an immutable digest. No install hook runs against PR code with privileged credentials. Browser checks can use a configured TAP suite and reviewed image with browser dependencies; optional screenshot capture supplies the AI UI/UX reviewer. Native ESM dependency resolution, writable-checkout tests, service containers, JUnit, production data, network calls, and other languages require a separately reviewed extension; unsupported required checks remain blocked. Details and limits are in [docs/execution.md](docs/execution.md).
+The default image supports dependency-free Node tests. Projects with dependencies need a reviewed image containing those dependencies at `/opt/qa/node_modules`. Configure `execution.image`, preferably with an immutable digest. No install hook runs against PR code with privileged credentials. Browser checks can use the bot-owned `web-preview` runner, or a configured TAP suite and reviewed browser image; both can supply screenshot evidence for the AI UI/UX reviewer. Native ESM dependency resolution, writable-checkout tests, service containers, JUnit, production data, network calls, and other languages require a separately reviewed extension; unsupported required checks remain blocked. Details and limits are in [docs/execution.md](docs/execution.md).
 
-Patch analysis identifies validation, authentication, authorization, error handling, and dynamic execution observations. These are heuristics, not a security audit or proof of correctness. Missing expectations, explicit `TBD`/`open question` text, configured visual judgment, and findings requiring interpretation produce targeted human checks. Contradictions can be made machine-detectable with `QA-EXPECT key: value` lines in descriptions/specs: different values for the same key create an owner question. The deterministic planner does not interpret arbitrary prose contradictions; optional AI reviewers can propose additional questions with explicit uncertainty. Test association is heuristic and gaps are included in reports. AI-generated tests remain candidates until their requirements and assertions are validated and they are added to an approved suite. The bot never executes model-supplied commands or silently applies suggested fixes.
+Patch analysis identifies validation, authentication, authorization, error handling, and dynamic execution observations. These are heuristics, not a security audit or proof of correctness. Missing expectations, explicit `TBD`/`open question` text, and findings requiring interpretation produce targeted human checks. Default CSS changes select automated browser coverage rather than imposing routine manual visual sign-off. Contradictions can be made machine-detectable with `QA-EXPECT key: value` lines in descriptions/specs: different values for the same key create an owner question. The deterministic planner does not interpret arbitrary prose contradictions; optional AI reviewers can propose additional questions with explicit uncertainty. Test association is heuristic and gaps are included in reports. AI-generated tests remain candidates until their requirements and assertions are validated and they are added to an approved suite. The bot never executes model-supplied commands or silently applies suggested fixes.
 
 For a check needing separately authorized access or external side effects, add a rule scenario with `method: "human"`, `kind: "access"`, a specific `question`, `reason`, and `expected` result. The request asks the configured owner to provide an authorized test result and evidence; the bot never grants itself external access or runs that action through a comment.
 
@@ -113,7 +116,7 @@ Configuration is reviewed in the **bot repository**:
 | `qa-rules.json` | Feature rules, regression expectations, human scenarios |
 | `people.json` | Verified GitHub-to-Slack mapping only; not a review roster |
 
-The default scope is PRs labeled `needs-qa`; set `scope.milestone` to select a release instead. Previously tracked PRs remain tracked after the completion label replaces `needs-qa`. `qa-complete` is based on results and decisions. The SHA-bound `qa-bot` commit status is the authoritative merge check; labels are a reconciled convenience and cannot be atomically updated with a concurrent force-push.
+Set `scope.prNumbers` to specific PR numbers, or use `PR_NUMBER` to select one PR without needing a label. Otherwise the default scope is PRs labeled `needs-qa`; set `scope.milestone` to select a release instead. Previously tracked PRs remain tracked after the completion label replaces `needs-qa`. `qa-complete` is based on results and decisions. The SHA-bound `qa-bot` commit status is the authoritative merge check; labels are a reconciled convenience and cannot be atomically updated with a concurrent force-push.
 
 Protect the bot default branch, the `qa-state` branch, and the **`qa-control` GitHub environment**. Restrict the environment's deployment branches to reviewed bot refs and allow the controller to write state. Do not add a per-run manual environment approval if automatic unattended testing is intended. Use a private bot repository when target code, reports, or evidence are private; state and Actions artifacts contain target information. Set `executionRef` to the trusted bot branch (default `main`).
 
@@ -123,13 +126,15 @@ Create and install a GitHub App on the target repository with:
 - Issues **read/write** for QA comments and labels (Pull requests read/write if required by your organization for PR comments).
 - Commit statuses **read/write** for the exact-SHA `qa-bot` status.
 
-The bot repository's `GITHUB_TOKEN` needs Contents write for state/request persistence and Actions write for dispatch and artifact reads. App credentials are separate from that token. No target workflow write permission is needed.
+The bot repository's `GITHUB_TOKEN` needs Contents write for state/request persistence and Actions write for dispatch and artifact reads. App credentials are separate from that token. No target Contents write, workflow write, commit push, or merge permission is needed. Keep `targetAccess: "report-status"` to post comments, labels, and statuses; `"read-only"` disables those metadata writes too. The controller rejects using the same repository for the product and bot state.
 
 Configure secrets/variables in the protected `qa-control` environment or bot repository:
 
 | Name | Kind | Use |
 | --- | --- | --- |
-| `OPENROUTER_API_KEY` | Secret | Optional AI calls; only in the privileged controller |
+| `OPENROUTER_API_KEY` | Secret | Optional hosted AI calls; only in the privileged controller |
+| `LOCAL_MODEL_API_KEY` | Secret | Optional authentication to the chosen local model server |
+| `QA_CONTROLLER_RUNNER` | Variable | Optional dedicated controller runner label for a local model server; default `ubuntu-latest` |
 | `QA_APP_ID`, `QA_APP_PRIVATE_KEY` | Secrets | Target GitHub App |
 | `TARGET_OWNER`, `TARGET_REPO` | Variables | Target repository |
 | `SLACK_WEBHOOK_URL` | Secret | Incoming webhook for the QA channel |
@@ -142,7 +147,7 @@ Configure secrets/variables in the protected `qa-control` environment or bot rep
 | `QA_ENABLED` | Variable | Default `false`; explicit activation gate |
 | `DRY_RUN` | Variable | Defaults to `true`; `false` is required for external writes |
 
-Local dashboard selections update `qa-config.json`. Commit that reviewed configuration to the bot repository to use it in Actions, and configure the OpenRouter secret in the protected environment. AI enablement and production activation are separate; both remain off in the shipped configuration. Source excerpts and opted-in screenshots are sent through OpenRouter to the selected model provider. See [privacy and cost controls](docs/ai.md).
+Local dashboard selections update `qa-config.json`. Commit that reviewed configuration to the bot repository to use it in Actions, and configure the OpenRouter secret in the protected environment. AI enablement and production activation are separate; both remain off in the shipped configuration. The selected backend receives source excerpts and opted-in screenshots. OpenRouter forwards them to its selected provider; local mode sends only to the configured loopback model endpoint and has no OpenRouter fallback. See [privacy and cost controls](docs/ai.md).
 
 For local `npm run sync`, use `APP_ID`/`APP_PRIVATE_KEY` (or `QA_APP_ID`/`QA_APP_PRIVATE_KEY`), `TARGET_OWNER`, `TARGET_REPO`, `BOT_REPOSITORY=owner/bot`, and a bot-scoped `GITHUB_TOKEN`. Set `DRY_RUN=true` first. Dry-run may read GitHub to construct plans, but it previews writes and does not persist dedupe state, send Slack messages, upload Drive files, change GitHub state, or dispatch workflows. `npm run demo` is the fully offline alternative.
 
@@ -208,7 +213,8 @@ For local `FileStore` use, writes are atomic and protected by `state.lock`. If a
 
 | Files | Responsibility |
 | --- | --- |
-| `src/ai/` | OpenRouter adapter, bounded specialist tool loops, source snapshots, model settings, review coordination and CLI |
+| `src/ai/` | OpenRouter/local adapters, bounded specialist tool loops, source snapshots, model settings, review coordination and CLI |
+| `src/web/`, `examples/web-suite.json` | Bot-owned browser audits, preview journeys, revision-bound screenshots and real browser demo |
 | `src/dashboard.js`, `ui/` | Local model catalog, team configuration and review activity |
 | `src/planner.js`, `src/core.js`, `src/decisions.js` | Plans, truthful outcomes, routing and decision authorization |
 | `src/run.js`, `src/lifecycle.js`, `src/state.js` | Controller, revisions, persistence and retry outbox |
@@ -218,4 +224,4 @@ For local `FileStore` use, writes are atomic and protected by `state.lock`. If a
 | `.github/workflows/qa-control.yml`, `.github/workflows/qa-execute.yml` | Completion-driven controller and isolated jobs |
 | `fixtures/tiny-app`, `test`, `src/demo.js` | Defect-detecting fixture, meaningful tests, offline demo |
 
-Tests cover structured outcomes, unauthorized/stale decisions, verified routing, duplicate events, persisted/concurrent state, retry exhaustion, Drive/Slack failures, dry-run writes, archive safety, test timeouts, and the intentional fixture defect. AI tests additionally cover mocked provider/tool calls, citations, model capabilities, budget limits, privacy settings, crash recovery, result integrity, screenshot boundaries, and dashboard HTTP security. The public OpenRouter catalog and local dashboard were checked live; paid inference was not exercised. Live Actions/App installation, Slack delivery, Google permissions, paid model responses, and the Docker/browser container runtime must be validated in a separately authorized staging deployment. No live integrations were activated during implementation.
+Tests cover structured outcomes, unauthorized/stale decisions, verified routing, duplicate events, persisted/concurrent state, retry exhaustion, Drive/Slack failures, dry-run writes, archive safety, test timeouts, and the intentional fixture defect. AI tests additionally cover mocked provider/tool calls, citations, model capabilities, budget limits, privacy settings, crash recovery, result integrity, screenshot boundaries, and dashboard HTTP security. The public OpenRouter catalog and local dashboard were checked live; paid inference was not exercised. `npm run demo:web` also verified real desktop/mobile Chromium checks against deliberately broken and corrected synthetic pages. Local model calls use mocked compatibility tests; no model was downloaded or benchmarked. Live Actions/App installation, Slack delivery, Google permissions, paid/local model responses, deployed browser jobs, and the Docker container runtime must be validated in a separately authorized staging deployment. No live integrations were activated during implementation.

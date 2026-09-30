@@ -7,7 +7,7 @@ const ROLES = [
   { id: 'ui-ux', name: 'UI / UX reviewer', icon: '▧', description: 'Reviews interface code, accessibility, and supplied screenshot evidence.' },
   { id: 'triage', name: 'Bug triage', icon: '↗', description: 'Investigates failed checks and turns evidence into actionable next steps.' },
 ];
-let config, savedConfig, revision, csrfToken, models = [], modelLimit = 24, saving = false, toastTimer;
+let config, savedConfig, revision, csrfToken, models = [], modelLimit = 24, saving = false, toastTimer, modelRequest = 0, credentials = { openrouter: false, local: false };
 const node = (tag, text, className) => {
   const element = document.createElement(tag);
   if (text !== undefined && text !== null) element.textContent = String(text);
@@ -25,6 +25,7 @@ async function api(url, options = {}) {
   if (!response.ok) throw new Error(result.error || 'The request could not be completed.');
   return result;
 }
+const isLocal = () => config?.backend === 'local';
 const hasTools = model => model.supportedParameters?.includes('tools');
 const hasVision = model => model.inputModalities?.includes('image');
 function eligible(model, target = 'default') {
@@ -91,16 +92,96 @@ function renderModelOptions() {
   $('default-model').replaceChildren(...options); $('default-model').value = config.model;
 }
 function renderSettings() {
-  renderModelOptions(); renderRoles();
+  renderConnection(); renderModelOptions(); renderRoles();
   $('ai-enabled').checked = config.enabled; $('allow-images').checked = config.allowImages; $('require-review').checked = config.requireReview;
   $('max-cost').value = config.maxCostUsd; $('max-calls').value = config.maxCallsPerRun; $('max-rounds').value = config.maxToolRounds; markChanged();
 }
+function renderConnection() {
+  const local = isLocal(), configured = credentials[local ? 'local' : 'openrouter'];
+  $('ai-backend').value = local ? 'local' : 'openrouter';
+  $('local-settings').hidden = !local;
+  $('local-base-url').value = config.local?.baseUrl || 'http://127.0.0.1:11434/v1';
+  $('workspace-backend').textContent = local ? 'Local model server' : 'OpenRouter models';
+  $('backend-eyebrow').textContent = local ? 'LOCAL INFERENCE' : 'OPENROUTER';
+  $('key-label').textContent = local ? (configured ? 'Local credential configured' : 'Local · key optional') : (configured ? 'API credential configured' : 'API credential needed');
+  $('key-dot').classList.toggle('ready', local || configured);
+  $('credential-help').textContent = local
+    ? 'Review context goes to the local model server you configure below. No OpenRouter credential or cloud fallback is used. Hardware, electricity, and model performance still matter.'
+    : configured ? 'Your OpenRouter credential is configured on the server. Select models below, then save your team configuration.'
+      : 'Set OPENROUTER_API_KEY in your terminal before starting the dashboard. Credentials stay on the server.';
+  $('backend-help').textContent = local ? 'Save your connection and profiles even while the model server is stopped. Start it before running a review.' : 'Choose specific hosted models for your team. A server credential is required for actual reviews.';
+  $('budget-help').textContent = local ? 'No provider token charges are recorded. Call and token limits still apply; local compute has a cost.' : 'Model calls stop before the configured limit.';
+  $('max-cost').disabled = local;
+  $('free-filter-label').hidden = local;
+  if (local) $('filter-free').checked = false;
+  $('catalog-eyebrow').textContent = local ? 'YOUR LOCAL MODEL SERVER' : 'POWERED BY OPENROUTER';
+  $('catalog-intro').textContent = local ? 'Browse server models and your configured profiles. Confirm capabilities before assigning a model to your team.' : 'Browse the live catalog. Compare capabilities and published prices. Select a model for your whole team or a specific role.';
+  $('catalog-disclaimer').textContent = local ? 'Local compute uses your hardware. Tool and vision capabilities come from your explicit profiles, not assumptions about a model name. A profile does not prove that the server is running or that the model is loaded.' : 'Prices are USD per 1 million tokens from the current catalog. Provider routing, image and request fees can vary. Tool calling and text output are required for this QA team.';
+  renderProfiles();
+}
+function renderProfiles() {
+  $('local-profile-list').replaceChildren(...(config.local?.models || []).map(profile => {
+    const row = node('div', null, 'local-profile-row'), description = node('div');
+    description.append(node('strong', profile.id), node('small', context(profile.contextLength) + ' context · ' + (profile.tools ? 'Tools confirmed' : 'Tools unconfirmed') + ' · ' + (profile.vision ? 'Vision confirmed' : 'Text only')));
+    const edit = node('button', 'Edit', 'text-button'), remove = node('button', 'Remove', 'text-button');
+    edit.addEventListener('click', () => editProfile(profile.id));
+    remove.addEventListener('click', () => {
+      config.local.models = config.local.models.filter(item => item.id !== profile.id);
+      if (config.model === profile.id) { config.model = ''; config.enabled = false; }
+      for (const role of Object.keys(config.roleModels)) if (config.roleModels[role] === profile.id) delete config.roleModels[role];
+      models = localModels(models); renderSettings(); renderModels(); markChanged();
+    });
+    row.append(description, edit, remove); return row;
+  }));
+}
+function localModels(discovered = []) {
+  const available = new Map(discovered.filter(model => !model.profileOnly).map(model => [model.id, model]));
+  for (const profile of config.local?.models || []) if (!available.has(profile.id)) available.set(profile.id, { id: profile.id, name: profile.id, profileOnly: true });
+  return [...available.values()].map(model => {
+    const profile = config.local?.models?.find(item => item.id === model.id);
+    return { ...model, name: model.name || model.id, description: model.description || 'Model served by your local inference server.', contextLength: profile?.contextLength || 0,
+      supportedParameters: profile?.tools ? ['tools'] : [], inputModalities: profile?.vision ? ['text', 'image'] : ['text'], outputModalities: ['text'],
+      pricing: { prompt: 0, completion: 0 }, profileConfigured: Boolean(profile) };
+  });
+}
+function editProfile(id = '') {
+  const profile = config.local?.models?.find(item => item.id === id);
+  $('profile-model-id').value = id; $('profile-context').value = profile?.contextLength || ''; $('profile-output').value = profile?.maxCompletionTokens || '';
+  $('profile-tools').checked = profile?.tools || false; $('profile-vision').checked = profile?.vision || false;
+  $('profile-status').textContent = ''; $('local-profile-editor').open = true; location.hash = 'team'; $('profile-model-id').focus();
+}
+function applyProfile() {
+  const id = $('profile-model-id').value.trim(), contextLength = Number($('profile-context').value), output = $('profile-output').value;
+  if (!id || !Number.isInteger(contextLength) || contextLength < 1024) { $('profile-status').textContent = 'Enter an exact model ID and a context limit of at least 1024 tokens.'; return; }
+  if (!['profile-context', 'profile-output'].every(id => $(id).reportValidity())) return;
+  const profile = { id, contextLength, tools: $('profile-tools').checked, vision: $('profile-vision').checked };
+  if (output) {
+    profile.maxCompletionTokens = Number(output);
+    if (profile.maxCompletionTokens > contextLength) { $('profile-status').textContent = 'The output limit cannot exceed the configured context tokens.'; return; }
+  }
+  const index = config.local.models.findIndex(item => item.id === id);
+  if (index < 0) config.local.models.push(profile); else config.local.models[index] = profile;
+  models = localModels(models); renderSettings(); renderModels(); markChanged();
+  $('profile-status').textContent = 'Profile added to your draft. Select a model for your team, then save configuration.';
+}
+async function loadModels() {
+  if (!config || !csrfToken) return;
+  const sequence = ++modelRequest, draft = { backend: config.backend || 'openrouter', local: config.local };
+  const signature = JSON.stringify(draft); $('refresh-models').disabled = true;
+  try {
+    const result = await api('/api/models', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-QA-CSRF': csrfToken }, body: JSON.stringify({ ai: draft }) });
+    if (sequence !== modelRequest || signature !== JSON.stringify({ backend: config.backend || 'openrouter', local: config.local })) return;
+    models = isLocal() ? localModels(result.models) : result.models;
+    renderModelOptions(); renderRoles(); renderModels(); errorNotice('');
+  } catch (error) {
+    if (sequence === modelRequest && signature === JSON.stringify({ backend: config.backend || 'openrouter', local: config.local })) { if (isLocal()) models = localModels(); renderModels(); renderModelOptions(); errorNotice(error.message); }
+  } finally { if (sequence === modelRequest) $('refresh-models').disabled = false; }
+}
 async function loadSettings() {
   const settings = await api('/api/settings'); config = settings.ai; savedConfig = structuredClone(config); revision = settings.revision;
-  $('key-label').textContent = settings.credentialConfigured ? 'API credential configured' : 'API credential needed';
-  $('key-dot').classList.toggle('ready', settings.credentialConfigured);
-  $('credential-help').textContent = settings.credentialConfigured ? 'Your OpenRouter credential is configured on the server. Select models below, then save your team configuration.'
-    : 'Set OPENROUTER_API_KEY in your terminal before starting the dashboard. Credentials stay on the server.';
+  credentials = settings.credentials || { openrouter: settings.credentialConfigured, local: false };
+  models = isLocal() ? localModels() : [];
+  $('filter-tools').checked = !isLocal();
   renderSettings(); renderModels();
 }
 const price = value => typeof value === 'number' && Number.isFinite(value)
@@ -119,11 +200,11 @@ function renderModels() {
   const cards = filtered.slice(0, modelLimit).map(model => {
     const card = node('article', null, 'model-card' + (selected === model.id ? ' selected' : ''));
     const top = node('div', null, 'model-topline'), capabilities = node('div', null, 'capabilities');
-    top.append(node('span', model.id.split('/')[0], 'provider-label'));
+    top.append(node('span', isLocal() ? 'Local compute' : model.id.split('/')[0], 'provider-label'));
     if (hasTools(model)) capabilities.append(node('span', 'Tools', 'capability'));
     if (hasVision(model)) capabilities.append(node('span', 'Vision', 'capability vision')); top.append(capabilities);
     const metrics = node('dl', null, 'model-metrics');
-    for (const [label, value] of [['Input / 1M', price(model.pricing?.prompt)], ['Output / 1M', price(model.pricing?.completion)], ['Context', context(model.contextLength)]]) {
+    for (const [label, value] of (isLocal() ? [['Compute', 'Local'], ['Profile', model.profileConfigured ? 'Configured' : 'Needed'], ['Context', context(model.contextLength)]] : [['Input / 1M', price(model.pricing?.prompt)], ['Output / 1M', price(model.pricing?.completion)], ['Context', context(model.contextLength)]])) {
       const item = node('div'); item.append(node('dt', label), node('dd', value)); metrics.append(item);
     }
     const button = node('button', selected === model.id ? 'Selected ✓' : 'Use for ' + (target === 'default' ? 'default model' : ROLES.find(role => role.id === target).name.toLowerCase()) + ' ↗', 'button ' + (selected === model.id ? 'primary' : 'secondary'));
@@ -133,11 +214,16 @@ function renderModels() {
       renderSettings(); renderModels(); toast(model.name + ' selected. Save your configuration to apply.');
     });
     card.append(top, node('h3', model.name), node('span', model.id, 'model-id'), node('p', model.description || 'No description provided by the model publisher.', 'model-description'), metrics, button);
+    if (isLocal()) {
+      const profileButton = node('button', model.profileConfigured ? 'Edit capability profile' : 'Configure capabilities', 'text-button profile-button');
+      profileButton.addEventListener('click', () => editProfile(model.id)); card.append(profileButton);
+      if (model.profileOnly) card.append(node('p', 'Saved profile. Availability has not been confirmed by the local server.', 'model-warning'));
+    }
     if (!eligible(model, target)) card.append(node('p', 'Requires tool calling, text input/output, and vision when screenshot review is enabled.', 'model-warning'));
-    else if (model.pricing?.prompt == null || model.pricing?.completion == null) card.append(node('p', 'Unknown token prices: execution is blocked until pricing can be checked.', 'model-warning'));
+    else if (!isLocal() && (model.pricing?.prompt == null || model.pricing?.completion == null)) card.append(node('p', 'Unknown token prices: execution is blocked until pricing can be checked.', 'model-warning'));
     return card;
   });
-  $('model-grid').replaceChildren(...(cards.length ? cards : [node('p', models.length ? 'No models match these filters. Try a broader search.' : 'The model catalog is not loaded. Reload this page to retry.', 'empty-state')]));
+  $('model-grid').replaceChildren(...(cards.length ? cards : [node('p', models.length ? 'No models match these filters. Try a broader search.' : isLocal() ? 'No local models are loaded. Start your model server and refresh models, or add a capability profile in Your QA team.' : 'The model catalog is not loaded. Refresh models in Your QA team to retry.', 'empty-state')]));
   $('show-more-models').hidden = filtered.length <= modelLimit;
 }
 function renderFinding(finding) {
@@ -191,13 +277,13 @@ async function loadRuns() {
   finally { $('refresh-runs').disabled = false; }
 }
 async function saveSettings() {
-  errorNotice(''); for (const id of ['max-cost', 'max-calls', 'max-rounds']) if (!$(id).reportValidity()) return;
+  errorNotice(''); if (isLocal() && !$('local-base-url').reportValidity()) return; for (const id of ['max-cost', 'max-calls', 'max-rounds']) if (!$(id).reportValidity()) return;
   saving = true; markChanged();
   const submitted = structuredClone(config);
   try {
     const result = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-QA-CSRF': csrfToken, 'If-Match': revision }, body: JSON.stringify({ ai: submitted }) });
     if (JSON.stringify(config) === JSON.stringify(submitted)) config = result.ai;
-    savedConfig = structuredClone(result.ai); revision = result.revision;
+    savedConfig = structuredClone(result.ai); revision = result.revision; credentials = result.credentials || credentials;
     renderSettings(); renderModels(); toast('Team configuration saved.');
   } catch (error) { errorNotice(error.message); }
   finally { saving = false; markChanged(); }
@@ -217,15 +303,29 @@ for (const [id, field, type] of [['ai-enabled', 'enabled', 'boolean'], ['allow-i
 for (const id of ['model-search', 'filter-tools', 'filter-vision', 'filter-free', 'filter-context', 'model-sort', 'assign-target']) $(id).addEventListener(id === 'model-search' ? 'input' : 'change', () => { modelLimit = 24; renderModels(); });
 $('show-more-models').addEventListener('click', () => { modelLimit += 24; renderModels(); });
 $('save-settings').addEventListener('click', () => { void saveSettings(); });
-$('reload-settings').addEventListener('click', () => { void loadSettings().then(() => { errorNotice(''); toast('Saved configuration reloaded.'); }).catch(error => errorNotice(error.message)); });
+$('reload-settings').addEventListener('click', () => { void loadSettings().then(() => { errorNotice(''); toast('Saved configuration reloaded.'); return loadModels(); }).catch(error => errorNotice(error.message)); });
 $('refresh-runs').addEventListener('click', () => { void loadRuns(); });
+$('ai-backend').addEventListener('change', () => {
+  if (!config) return;
+  config.backend = $('ai-backend').value; config.model = ''; config.roleModels = {}; config.enabled = false;
+  config.local ||= { baseUrl: 'http://127.0.0.1:11434/v1', models: [] };
+  models = isLocal() ? localModels() : []; $('filter-tools').checked = !isLocal();
+  renderSettings(); renderModels(); markChanged(); void loadModels();
+  toast('Connection changed. Choose models and enable AI reviews, then save.');
+});
+$('local-base-url').addEventListener('change', () => {
+  if (!config) return; config.local.baseUrl = $('local-base-url').value.trim(); models = localModels(); renderModels(); markChanged(); void loadModels();
+});
+$('apply-profile').addEventListener('click', applyProfile);
+$('refresh-models').addEventListener('click', () => { void loadModels(); });
 async function start() {
   navigate(location.hash.slice(1));
   const tasks = await Promise.allSettled([
     api('/api/bootstrap').then(result => { csrfToken = result.csrfToken; }),
     loadSettings(),
-    api('/api/models').then(result => { models = result.models; renderModelOptions(); renderRoles(); renderModels(); }),
   ]);
-  const errors = tasks.filter(task => task.status === 'rejected').map(task => task.reason.message); if (errors.length) errorNotice(errors.join(' '));
+  const errors = tasks.filter(task => task.status === 'rejected').map(task => task.reason.message);
+  if (errors.length) errorNotice(errors.join(' '));
+  else await loadModels();
 }
 void start();

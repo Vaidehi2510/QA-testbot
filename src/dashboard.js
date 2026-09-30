@@ -2,7 +2,7 @@ const http = require('node:http');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { OpenRouterClient } = require('./ai/openrouter');
+const { createAIClient } = require('./ai/client');
 const { DEFAULT_AI_CONFIG, validateAIConfig } = require('./ai/settings');
 
 const ASSETS = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
@@ -54,19 +54,38 @@ async function withConfigLock(configPath, operation) {
 }
 
 function createDashboard({ configPath = path.resolve('qa-config.json'), statePath = path.resolve('.qa-local/state.json'), client,
-  apiKey = process.env.OPENROUTER_API_KEY, assetsPath = path.join(__dirname, '..', 'ui') } = {}) {
+  clientFactory = createAIClient, apiKey = process.env.OPENROUTER_API_KEY, localApiKey = process.env.LOCAL_MODEL_API_KEY, assetsPath = path.join(__dirname, '..', 'ui') } = {}) {
   const token = crypto.randomBytes(32).toString('hex');
-  const router = client || new OpenRouterClient({ apiKey });
-  let catalog, catalogAt = 0, catalogRequest;
-  const getModels = async () => {
-    if (catalog && Date.now() - catalogAt < 300_000) return catalog;
-    if (!catalogRequest) catalogRequest = Promise.resolve().then(() => router.listModels()).then((models) => {
+  const catalogs = new Map();
+  const credentials = ai => ({
+    credentialConfigured: Boolean(ai.backend === 'local' ? localApiKey : apiKey),
+    credentialRequired: ai.backend !== 'local',
+    credentials: { openrouter: Boolean(apiKey), local: Boolean(localApiKey) },
+  });
+  const getModels = async ai => {
+    const backend = ai.backend || 'openrouter';
+    const key = backend === 'local' ? JSON.stringify([backend, ai.local]) : backend;
+    let entry = catalogs.get(key);
+    if (entry?.models && Date.now() - entry.fetchedAt < 300_000) return entry;
+    if (!entry) {
+      // A bounded cache also prevents draft capability edits growing server memory indefinitely.
+      if (catalogs.size >= 20) catalogs.delete(catalogs.keys().next().value);
+      entry = {}; catalogs.set(key, entry);
+    }
+    if (!entry.request) entry.request = Promise.resolve().then(async () => {
+      const provider = backend === 'openrouter' && client ? client : clientFactory({ ai, env: { OPENROUTER_API_KEY: apiKey, LOCAL_MODEL_API_KEY: localApiKey } });
+      const models = await provider.listModels();
       if (!Array.isArray(models)) throw new Error('Invalid model catalog');
-      catalog = models;
-      catalogAt = Date.now();
-      return models;
-    }).catch(() => { throw fail(503, 'OpenRouter model catalog is unavailable. Check connectivity and retry.'); }).finally(() => { catalogRequest = undefined; });
-    return catalogRequest;
+      entry.models = models; entry.fetchedAt = Date.now();
+      return entry;
+    }).catch(() => { throw fail(503, backend === 'local'
+      ? 'Local model server is unavailable. Check its address and start the server. You can still save your local connection and capability profiles.'
+      : 'OpenRouter model catalog is unavailable. Check connectivity and retry.'); }).finally(() => { entry.request = undefined; });
+    return entry.request;
+  };
+  const modelResponse = async ai => {
+    const entry = await getModels(ai);
+    return { backend: ai.backend || 'openrouter', models: entry.models, fetchedAt: new Date(entry.fetchedAt).toISOString() };
   };
   const readConfig = async () => {
     const source = await fs.readFile(configPath, 'utf8');
@@ -83,25 +102,39 @@ function createDashboard({ configPath = path.resolve('qa-config.json'), statePat
     try {
       secureRequest(req);
       const route = new URL(req.url, `http://${req.headers.host}`).pathname;
-      const allowedMethod = route === '/api/settings' ? ['GET', 'PUT'] : ['GET'];
+      const allowedMethod = route === '/api/settings' ? ['GET', 'PUT'] : route === '/api/models' ? ['GET', 'POST'] : ['GET'];
       if (!allowedMethod.includes(req.method)) { res.setHeader('Allow', allowedMethod.join(', ')); throw fail(405, 'Method not allowed.'); }
-      if (req.method === 'PUT') {
+      if (['PUT', 'POST'].includes(req.method)) {
         const supplied = req.headers['x-qa-csrf'];
         if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) throw fail(403, 'Refresh the dashboard before saving.');
       }
       if (route === '/api/bootstrap') return send(200, { csrfToken: token });
-      if (route === '/api/models') return send(200, { models: await getModels(), fetchedAt: new Date(catalogAt).toISOString() });
+      if (route === '/api/models') {
+        let ai;
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          if (!body || Array.isArray(body) || Object.keys(body).length !== 1 || !body.ai || typeof body.ai !== 'object' || Array.isArray(body.ai)
+            || Object.keys(body.ai).some(key => !['backend', 'local'].includes(key))) throw fail(400, 'Provide only backend and local connection settings for catalog preview.');
+          try { ai = validateAIConfig({ ...DEFAULT_AI_CONFIG, ...body.ai }); }
+          catch (error) { throw fail(400, error.message); }
+        } else ai = validateAIConfig((await readConfig()).config.ai || DEFAULT_AI_CONFIG);
+        return send(200, await modelResponse(ai));
+      }
       if (route === '/api/settings' && req.method === 'GET') {
         const { config, revision } = await readConfig();
         const ai = validateAIConfig(config.ai || DEFAULT_AI_CONFIG);
-        return send(200, { ai, credentialConfigured: Boolean(apiKey), revision });
+        return send(200, { ai, ...credentials(ai), revision });
       }
       if (route === '/api/settings' && req.method === 'PUT') {
         const body = await readBody(req);
         if (!body || Array.isArray(body) || Object.keys(body).length !== 1 || !body.ai || typeof body.ai !== 'object') throw fail(400, 'Provide only the ai settings object.');
         if (!req.headers['if-match']) throw fail(428, 'Reload settings before saving.');
         let ai;
-        try { ai = validateAIConfig(body.ai, { models: await getModels() }); }
+        try {
+          ai = validateAIConfig(body.ai);
+          // Local profiles are explicit operator configuration. Saving never requires a running local server.
+          if (ai.backend !== 'local' && (ai.enabled || ai.model || Object.keys(ai.roleModels).length)) ai = validateAIConfig(ai, { models: (await getModels(ai)).models });
+        }
         catch (error) { if (error.status) throw error; throw fail(400, error.message); }
         const savedRevision = await withConfigLock(configPath, async () => {
           const { config, revision } = await readConfig();
@@ -116,7 +149,7 @@ function createDashboard({ configPath = path.resolve('qa-config.json'), statePat
             return fingerprint(source);
           } finally { await fs.rm(temporary, { force: true }); }
         });
-        return send(200, { ai, credentialConfigured: Boolean(apiKey), revision: savedRevision });
+        return send(200, { ai, ...credentials(ai), revision: savedRevision });
       }
       if (route === '/api/runs') {
         let state;

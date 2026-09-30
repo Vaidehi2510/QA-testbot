@@ -3,8 +3,10 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { localSnapshot, readScreenshots } = require('./snapshot');
+const { executeWebCheck } = require('../web/execute');
+const { validateWebSuite } = require('../web/audit');
 const { validateAIConfig } = require('./settings');
-const { OpenRouterClient } = require('./openrouter');
+const { createAIClient } = require('./client');
 const { addReviewGate, reviewStage } = require('./pipeline');
 const { generatePlan } = require('../planner');
 const { assessPR, digest } = require('../lifecycle');
@@ -14,7 +16,7 @@ const { renderReport } = require('../report');
 
 function parseArgs(argv) {
   const options = {};
-  const allowed = new Set(['repo', 'base', 'head', 'repository', 'pr', 'title', 'description-file', 'config', 'rules', 'output-dir', 'screenshots', 'results', 'model', 'rerun-token']);
+  const allowed = new Set(['repo', 'base', 'head', 'repository', 'pr', 'title', 'description-file', 'config', 'rules', 'output-dir', 'screenshots', 'results', 'model', 'rerun-token', 'web-suite']);
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--dry-run') { options.dryRun = true; continue; }
     const name = argv[i].replace(/^--/, '');
@@ -24,20 +26,29 @@ function parseArgs(argv) {
   return options;
 }
 
-async function reviewLocal({ options, client, team, log = console.log, env = process.env }) {
+async function reviewLocal({ options, client, team, webRunner = executeWebCheck, log = console.log, env = process.env }) {
   const root = path.join(__dirname, '../..');
   const configPath = path.resolve(options.config || path.join(root, 'qa-config.json'));
   const config = JSON.parse(await fs.readFile(configPath, 'utf8'));
   if (options.model) config.ai = { ...config.ai, enabled: true, model: options.model, roleModels: {} };
   config.ai = validateAIConfig(config.ai || {});
   const dryRun = Boolean(options.dryRun || env.DRY_RUN === 'true');
-  if (!config.ai.enabled && !dryRun) throw new Error('Enable AI and choose a model in npm run dashboard, or pass --model <OpenRouter model ID>.');
+  if (!config.ai.enabled && !dryRun) throw new Error('Enable AI and choose a model in npm run dashboard, or pass --model <model ID>.');
   const rules = JSON.parse(await fs.readFile(options.rules || path.join(root, 'qa-rules.json'), 'utf8'));
   const pr = await localSnapshot({ repositoryPath: options.repo || process.cwd(), base: options.base || 'main', head: options.head || 'HEAD', config,
     repository: options.repository, number: Number(options.pr || 1), title: options.title,
     body: options['description-file'] ? await fs.readFile(options['description-file'], 'utf8') : '' });
   pr.screenshots = await readScreenshots(options.screenshots, pr.revision);
   if (!Number.isSafeInteger(pr.number) || pr.number < 1) throw new Error('--pr must be a positive integer');
+  const webSuite = options['web-suite'] ? JSON.parse(await fs.readFile(options['web-suite'], 'utf8')) : null;
+  const webRunnerId = config.runners?.some(runner => runner.id === 'ui-tests') ? 'web-preview-cli' : 'ui-tests';
+  if (webSuite) {
+    validateWebSuite(webSuite, { revision: pr.revision, prNumber: pr.number });
+    if (config.runners?.some(runner => runner.id === webRunnerId)) throw new Error('The dedicated browser runner ID already exists; configure its suite in trusted configuration instead.');
+    config.runners = [...(config.runners || []),
+      { id: webRunnerId, type: 'web-preview', baseline: true, suite: webSuite,
+        expected: 'The configured desktop/mobile preview checks and explicit journey assertions pass at this exact commit.' }];
+  }
   const plan = addReviewGate(generatePlan(pr, rules, config), config, pr.revision);
   plan.fingerprint = digest([plan.fingerprint, pr.screenshots.map(image => image.sha256)]);
   if (dryRun) {
@@ -46,11 +57,21 @@ async function reviewLocal({ options, client, team, log = console.log, env = pro
     return { status: 'preview', pr, plan };
   }
   const directory = path.resolve(options['output-dir'] || path.join(root, '.qa-local'));
+  // Reports and candidate files belong to the bot, never the product checkout.
+  const productRoot = await fs.realpath(path.resolve(options.repo || process.cwd()));
+  let ancestor = directory, suffix = '';
+  while (true) {
+    try { ancestor = path.join(await fs.realpath(ancestor), suffix); break; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; suffix = path.join(path.basename(ancestor), suffix); ancestor = path.dirname(ancestor); }
+  }
+  const relativeOutput = path.relative(productRoot, ancestor);
+  if (relativeOutput === '' || !relativeOutput.startsWith(`..${path.sep}`) && relativeOutput !== '..' && !path.isAbsolute(relativeOutput)) throw new Error('Review output must be outside the product repository; choose --output-dir in the bot workspace or a temporary directory.');
   const store = new FileStore(directory);
   return store.withLock(async (state, save) => {
     const { run } = assessPR(state, pr, plan, config, { rerunToken: options['rerun-token'] || '' });
     run.limitations ||= [];
-    run.limitations.push('Local AI review reads committed source. It does not run the application or tests, change files, or publish remote results.');
+    run.limitations.push(webSuite ? 'Local review reads committed source and runs the explicitly configured bot-owned preview suite. It does not change product files or publish remote results.'
+      : 'Local AI review reads committed source. It does not run the application or tests, change files, or publish remote results.');
     let results = [];
     if (options.results) {
       const envelope = JSON.parse(await fs.readFile(options.results, 'utf8'));
@@ -72,10 +93,27 @@ async function reviewLocal({ options, client, team, log = console.log, env = pro
       results = envelope.results;
       run.limitations.push('Test results were imported from a local file; remote workflow provenance was not independently verified.');
     }
-    const aiClient = client || new OpenRouterClient({ apiKey: env.OPENROUTER_API_KEY, timeoutMs: 30000, maxRetries: 0 });
+    const aiClient = client || createAIClient({ ai: config.ai, env, timeoutMs: config.ai.backend === 'local' ? 120000 : 30000, maxRetries: 0 });
     const review = stage => reviewStage({ run, pr, config, client: aiClient, stage, save: () => save(state), ...(team ? { team } : {}) });
-    log(`Reviewing ${pr.repository} ${pr.revision.slice(0, 12)} with OpenRouter. Source context: ${pr.sourceFiles.length} files.`);
+    log(`Reviewing ${pr.repository} ${pr.revision.slice(0, 12)} with ${config.ai.backend === 'local' ? 'the configured local model server' : 'OpenRouter'}. Source context: ${pr.sourceFiles.length} files.`);
     await review('planning');
+    if (webSuite) {
+      const checkId = `runner-${webRunnerId}`;
+      const webDir = path.join(directory, 'browser', run.key);
+      if (!run.web) {
+        run.web = await webRunner({ suite: webSuite, metadata: { repository: pr.repository, prNumber: pr.number, revision: pr.revision },
+          outputDir: webDir, checkId, env });
+        await save(state);
+      }
+      if (results.some(result => result.checkId === checkId)) throw new Error('Imported evidence cannot replace the requested browser execution');
+      results.push(run.web.result);
+      run.limitations.push(...(run.web.limitations || []));
+      const manifestPath = path.join(webDir, 'screenshots.json');
+      await fs.mkdir(webDir, { recursive: true });
+      await fs.writeFile(manifestPath, JSON.stringify({ revision: pr.revision, environment: 'disposable-web-preview',
+        images: (run.web.screenshots || []).map(item => ({ name: item.name, path: item.path })) }), { mode: 0o600 });
+      pr.screenshots = [...pr.screenshots, ...await readScreenshots(manifestPath, pr.revision)].slice(0, 4);
+    }
     // Planning may add existing trusted suites. Validate their check IDs only
     // after resuming/applying that plan, before importing evidence or triage.
     const trustedRunners = new Set((config.runners || []).map(runner => runner.id));

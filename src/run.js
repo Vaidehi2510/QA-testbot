@@ -10,7 +10,7 @@ const { dispatchExecution } = require('./dispatch');
 const { DriveAdapter } = require('./drive');
 const { SlackAdapter, completionMessage, requestMessage } = require('./slack');
 const { renderReport } = require('./report');
-const { OpenRouterClient } = require('./ai/openrouter');
+const { createAIClient } = require('./ai/client');
 const { addReviewGate, reviewStage, applyAssessment } = require('./ai/pipeline');
 
 function executionRequest(run, config) {
@@ -21,6 +21,7 @@ function executionRequest(run, config) {
 // Dependencies are injected so the same state machine runs in offline integration tests.
 async function reconcile({ state, save, config, rules, people, prs, workflows = [], integrations, dryRun = false,
   rerunToken = '', prNumber, retryIntegrations = false, log = console.log, skipAICompletion = false }) {
+  const reportTarget = github.targetAccessMode(config) === 'report-status';
   if (dryRun) { state = structuredClone(state); save = async () => {}; }
   if (retryIntegrations && !dryRun) for (const e of Object.values(state.effects)) {
     if (e.status === 'exhausted') { e.status = 'pending'; e.attempts = 0; delete e.nextAttemptAt; }
@@ -45,7 +46,7 @@ async function reconcile({ state, save, config, rules, people, prs, workflows = 
     if (created || (current.phase === 'queued' && !current.request)) {
       current.request = executionRequest(current, config);
       queueEffect(state, `${current.key}:dispatch`, 'dispatch', current.key);
-      queueEffect(state, `${current.key}:plan`, 'plan', current.key);
+      if (reportTarget) queueEffect(state, `${current.key}:plan`, 'plan', current.key);
       log(`QA assessment ${pr.repository}#${pr.number} @ ${pr.revision.slice(0, 12)}: ${plan.checks.length} checks`);
     }
   }
@@ -107,6 +108,7 @@ async function reconcile({ state, save, config, rules, people, prs, workflows = 
       [h.event, h.snapshot?.report.status, h.snapshot?.report.url])]);
     if (current) {
       for (const type of ['plan', 'dispatch']) {
+        if (type === 'plan' && !reportTarget) continue;
         const effect = state.effects[`${run.key}:${type}`];
         if (!effect) continue;
         if (type === 'dispatch') {
@@ -125,8 +127,10 @@ async function reconcile({ state, save, config, rules, people, prs, workflows = 
         const e = queueEffect(state, `${run.key}:question:${check.id}`, 'question', run.key);
         await deliver(e, () => integrations.slack.send(requestMessage(check, { ...run.pr, revision: run.revision }, routing), { key: e.key }));
       }
-      const status = queueEffect(state, `${run.key}:status:${version}`, 'status', run.key);
-      await deliver(status, () => integrations.status(run));
+      if (reportTarget) {
+        const status = queueEffect(state, `${run.key}:status:${version}`, 'status', run.key);
+        await deliver(status, () => integrations.status(run));
+      }
     }
     if (run.phase !== 'completed') continue;
     run.report.markdown = renderReport(run); // Retain the exact report even when Drive is unavailable.
@@ -208,6 +212,8 @@ async function invokeReview({ run, pr, config, integrations, stage, save, dryRun
 async function main(env = process.env) {
   const root = path.join(__dirname, '..');
   const [config, rules, people] = await Promise.all(['qa-config.json', 'qa-rules.json', 'people.json'].map(async filename => JSON.parse(await fs.readFile(path.join(root, filename), 'utf8'))));
+  github.targetAccessMode(config);
+  github.selectedPRNumbers(config, env.PR_NUMBER);
   const dryRun = env.DRY_RUN !== 'false';
   const enabled = config.enabled || env.QA_ENABLED === 'true';
   if (!enabled && !dryRun) throw new Error('Activation disabled. Set QA_ENABLED=true after configuring the isolated environment, or use DRY_RUN=true.');
@@ -216,6 +222,7 @@ async function main(env = process.env) {
   }
   const [owner, repo] = env.BOT_REPOSITORY.split('/');
   const target = { owner: env.TARGET_OWNER, repo: env.TARGET_REPO };
+  github.assertRepositorySeparation(config, `${target.owner}/${target.repo}`, env.BOT_REPOSITORY);
   const [gh, bot] = await Promise.all([
     github.getClient({ ...target, appId: env.APP_ID || env.QA_APP_ID, privateKey: (env.APP_PRIVATE_KEY || env.QA_APP_PRIVATE_KEY).replace(/\\n/g, '\n') }),
     github.getClient({ token: env.GITHUB_TOKEN }),
@@ -234,7 +241,7 @@ async function main(env = process.env) {
       prs = run?.repository === `${target.owner}/${target.repo}` ? [await github.fetchPR(gh, target.owner, target.repo, run.pr.number, config)] : [];
     } else {
       [prs, workflows] = await Promise.all([
-        github.fetchReleasePRs(gh, target.owner, target.repo, config, tracked),
+        github.fetchReleasePRs(gh, target.owner, target.repo, config, tracked, { prNumber: env.PR_NUMBER }),
         github.workflowRuns(bot, owner, repo),
       ]);
     }
@@ -244,23 +251,14 @@ async function main(env = process.env) {
       accessToken: env.GOOGLE_DRIVE_ACCESS_TOKEN || env.GOOGLE_ACCESS_TOKEN, dryRun, onCheckpoint: () => save(state) });
     const slack = new SlackAdapter({ webhookUrl: env.SLACK_WEBHOOK_URL, botToken: env.SLACK_BOT_TOKEN, channelId: env.SLACK_CHANNEL_ID, dryRun });
     const integrations = {
-      drive, slack, ai: new OpenRouterClient({ apiKey: env.OPENROUTER_API_KEY, dryRun, timeoutMs: 20000, maxRetries: 0 }),
+      drive, slack, ai: createAIClient({ ai: config.ai, env, dryRun, timeoutMs: config.ai?.backend === 'local' ? 120000 : 20000, maxRetries: 0 }),
       putRequest: (key, request) => store.putRequest(key, request),
       dispatch: key => dispatchExecution({ gh: bot, owner, repo, requestKey: key, ref: config.executionRef, dryRun, enabled }),
       readResults: (workflow, key) => github.readResultsArtifact(bot, owner, repo, workflow, key),
       readImages: run => github.readRunScreenshots(bot, owner, repo, run),
       currentRevision: async run => run.repository === `${target.owner}/${target.repo}`
         ? (await gh.rest.pulls.get({ ...target, pull_number: run.pr.number })).data.head.sha : null,
-      plan: run => github.upsertComment(gh, target.owner, target.repo, run.pr.number, '<!-- qa-plan:auto -->', `${run.plan.markdown}\n\nTested revision: \`${run.revision}\`.\nHuman responses: \`/qa-tested check:<id> revision:${run.revision} result:pass|fail reason:<explanation>\`.`, { dryRun }),
-      status: async run => {
-        if (!dryRun) {
-          const outcome = run.outcome.status;
-          await gh.rest.repos.createCommitStatus({ ...target, sha: run.revision, context: 'qa-bot',
-            state: outcome === 'passed' ? 'success' : outcome === 'failed' ? 'failure' : outcome === 'execution_error' ? 'error' : 'pending',
-            description: `QA ${outcome}; attempt ${run.attempt}`.slice(0, 140), target_url: run.evidenceUrl || run.pr.url });
-        }
-        return github.updateLabels(gh, target.owner, target.repo, run.pr.number, run.outcome, config, { dryRun });
-      },
+      ...github.createTargetReporters(gh, target.owner, target.repo, config, { dryRun }),
     };
     if (dryRun) {
       const send = slack.send.bind(slack);

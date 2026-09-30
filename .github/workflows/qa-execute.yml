@@ -74,11 +74,23 @@ jobs:
           path: ${{ runner.temp }}/qa-bundle
       - name: Verify and safely extract source data
         run: python3 src/unpack-source.py "$RUNNER_TEMP/qa-bundle/source.tar.gz" "$RUNNER_TEMP/qa-bundle/source.json" "$RUNNER_TEMP/qa-source"
+      - name: Identify trusted browser suites
+        id: browser
+        run: node -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/qa-bundle/request.json"));fs.appendFileSync(process.env.GITHUB_OUTPUT,"needed="+r.plan.checks.some(c=>c.method==="automated"&&r.config.runners.some(x=>x.id===c.runner&&x.type==="web-preview"))+"\n");'
+      - name: Install trusted bot browser tooling
+        if: steps.browser.outputs.needed == 'true'
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node node_modules/playwright-core/cli.js install --with-deps chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/qa-browsers
       - name: Pull trusted test environment before disabling network for PR code
         run: |
           node -e 'const fs=require("node:fs");const {spawnSync}=require("node:child_process");const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/qa-bundle/request.json"));const i=r.config.execution?.image||"node:22-bookworm-slim";if(!/^[a-zA-Z0-9][a-zA-Z0-9._:/@-]+$/.test(i))throw Error("Invalid image");const p=spawnSync("docker",["pull",i],{stdio:"inherit"});process.exit(p.status??1);'
       - name: Run isolated checks and collect structured TAP results
         run: node src/execute.js --request "$RUNNER_TEMP/qa-bundle/request.json" --checkout "$RUNNER_TEMP/qa-source" --attestation "$RUNNER_TEMP/qa-bundle/source.json" --output "$RUNNER_TEMP/qa-results"
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/qa-browsers
       - uses: actions/upload-artifact@v4
         if: always()
         with:

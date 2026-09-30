@@ -8,6 +8,34 @@ const crypto = require('node:crypto');
 const { githubSnapshot } = require('./ai/snapshot');
 const { screenshotType } = require('./images');
 
+function targetAccessMode(config = {}) {
+  const mode = config.targetAccess ?? 'report-status';
+  if (!['read-only', 'report-status'].includes(mode)) throw new Error('targetAccess must be read-only or report-status');
+  return mode;
+}
+
+function assertRepositorySeparation(config, targetRepository, botRepository) {
+  targetAccessMode(config);
+  for (const name of [targetRepository, botRepository]) {
+    if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.-]+$/.test(name)
+      || ['.', '..'].includes(name.split('/')[1]) || /\.git$/i.test(name)) throw new Error('Target and bot repositories must use distinct owner/repository names');
+  }
+  if (String(targetRepository).toLowerCase() === String(botRepository).toLowerCase()) {
+    throw new Error('Product code must remain unchanged: use a separate BOT_REPOSITORY for bot state, workflows, and reports');
+  }
+}
+
+function selectedPRNumbers(config = {}, prNumber) {
+  const configured = config.scope?.prNumbers;
+  if (configured !== undefined && (!Array.isArray(configured) || configured.length > 100
+    || configured.some(number => !Number.isSafeInteger(number) || number < 1))) throw new Error('scope.prNumbers must contain at most 100 positive integer PR numbers');
+  if (prNumber !== undefined && prNumber !== null && prNumber !== '') {
+    if (!/^\d+$/.test(String(prNumber)) || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) throw new Error('PR_NUMBER must be a positive integer');
+    return [Number(prNumber)];
+  }
+  return configured?.length ? [...new Set(configured)] : null;
+}
+
 async function getClient({ appId, privateKey, owner, repo, token }) {
   const { Octokit } = await import('@octokit/rest');
   if (token) return new Octokit({ auth: token, request: { timeout: 20000 } });
@@ -57,7 +85,13 @@ async function fetchPR(gh, owner, repo, number, config = {}) {
     comments: comments.map(c => ({ id: c.id, user: c.user?.login, body: c.body, createdAt: c.created_at })) };
 }
 
-async function fetchReleasePRs(gh, owner, repo, config, trackedNumbers = []) {
+async function fetchReleasePRs(gh, owner, repo, config, trackedNumbers = [], { prNumber } = {}) {
+  const explicit = selectedPRNumbers(config, prNumber);
+  if (explicit) {
+    const prs = [];
+    for (const number of explicit) prs.push(await fetchPR(gh, owner, repo, number, config));
+    return prs;
+  }
   const args = { owner, repo, state: 'all', per_page: 100 };
   if (config.scope?.milestone) {
     const milestones = await gh.paginate(gh.rest.issues.listMilestones, { owner, repo, state: 'all', per_page: 100 });
@@ -72,7 +106,8 @@ async function fetchReleasePRs(gh, owner, repo, config, trackedNumbers = []) {
   return prs;
 }
 
-async function upsertComment(gh, owner, repo, prNumber, marker, body, { dryRun = false } = {}) {
+async function upsertComment(gh, owner, repo, prNumber, marker, body, { dryRun = false, targetAccess } = {}) {
+  if (targetAccessMode({ targetAccess }) === 'read-only') return { status: 'skipped', reason: 'Target repository is read-only' };
   if (dryRun) return { status: 'preview', body };
   const comments = await gh.paginate(gh.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
   // An author-controlled marker must not allow the bot to edit somebody else's comment.
@@ -85,6 +120,7 @@ async function upsertComment(gh, owner, repo, prNumber, marker, body, { dryRun =
 }
 
 async function updateLabels(gh, owner, repo, number, outcome, config, { dryRun = false } = {}) {
+  if (targetAccessMode(config) === 'read-only') return { status: 'skipped', reason: 'Target repository is read-only' };
   const want = outcome.status === 'passed' ? config.completeLabel : config.needsQaLabel;
   const other = want === config.completeLabel ? config.needsQaLabel : config.completeLabel;
   if (dryRun) return { status: 'preview', want };
@@ -100,6 +136,29 @@ async function updateLabels(gh, owner, repo, number, outcome, config, { dryRun =
   try { await gh.rest.issues.removeLabel({ owner, repo, issue_number: number, name: other }); }
   catch (error) { if (error.status !== 404) throw error; }
   return { status: 'sent', label: want };
+}
+
+// Keep the target write boundary explicit even if a caller bypasses reconcile.
+// These adapters only publish QA metadata and never change product source files.
+function createTargetReporters(gh, owner, repo, config = {}, { dryRun = false } = {}) {
+  const mode = targetAccessMode(config);
+  const skipped = () => ({ status: 'skipped', reason: 'Target repository is read-only' });
+  return {
+    async plan(run) {
+      if (mode === 'read-only') return skipped();
+      return upsertComment(gh, owner, repo, run.pr.number, '<!-- qa-plan:auto -->', `${run.plan.markdown}\n\nTested revision: \`${run.revision}\`.\nHuman responses: \`/qa-tested check:<id> revision:${run.revision} result:pass|fail reason:<explanation>\`.`, { dryRun, targetAccess: mode });
+    },
+    async status(run) {
+      if (mode === 'read-only') return skipped();
+      if (!dryRun) {
+        const outcome = run.outcome.status;
+        await gh.rest.repos.createCommitStatus({ owner, repo, sha: run.revision, context: 'qa-bot',
+          state: outcome === 'passed' ? 'success' : outcome === 'failed' ? 'failure' : outcome === 'execution_error' ? 'error' : 'pending',
+          description: `QA ${outcome}; attempt ${run.attempt}`.slice(0, 140), target_url: run.evidenceUrl || run.pr.url });
+      }
+      return updateLabels(gh, owner, repo, run.pr.number, run.outcome, config, { dryRun });
+    },
+  };
 }
 
 async function workflowRuns(gh, owner, repo) {
@@ -155,4 +214,5 @@ async function readRunScreenshots(gh, owner, repo, run) {
   return images;
 }
 
-module.exports = { getClient, fetchPR, fetchReleasePRs, upsertComment, updateLabels, workflowRuns, readResultsArtifact, readRunScreenshots };
+module.exports = { getClient, fetchPR, fetchReleasePRs, upsertComment, updateLabels, workflowRuns, readResultsArtifact, readRunScreenshots,
+  targetAccessMode, assertRepositorySeparation, selectedPRNumbers, createTargetReporters };

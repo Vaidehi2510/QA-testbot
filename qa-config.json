@@ -1,11 +1,12 @@
 {
   "enabled": false,
+  "targetAccess": "report-status",
   "executionRef": "main",
   "stateBranch": "qa-state",
   "environment": "synthetic-node22",
   "needsQaLabel": "needs-qa",
   "completeLabel": "qa-complete",
-  "scope": { "label": "needs-qa", "milestone": null },
+  "scope": { "prNumbers": [], "label": "needs-qa", "milestone": null },
   "decisionReviewers": [],
   "featureOwners": {},
   "qaGroupId": "",
@@ -15,6 +16,8 @@
   "drive": { "folderId": "", "sharedDriveId": "" },
   "ai": {
     "enabled": false,
+    "backend": "openrouter",
+    "local": { "baseUrl": "http://127.0.0.1:11434/v1", "models": [] },
     "model": "",
     "roleModels": {},
     "roles": ["planner", "code-review", "security", "ui-ux", "triage"],

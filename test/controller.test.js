@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { reconcile } = require('../src/run');
 const { emptyState } = require('../src/state');
-const config = { environment: 'synthetic', dispatchTimeoutMinutes: 30, maxIntegrationAttempts: 2,
+const config = { environment: 'synthetic', targetAccess: 'report-status', dispatchTimeoutMinutes: 30, maxIntegrationAttempts: 2,
   runners: [{ id: 'node-tests', type: 'node-test', baseline: true, files: ['calculator.test.js'] }], decisionReviewers: ['owner'] };
 const pr = { repository: 'acme/app', number: 1, title: 'Shipping boundary', body: 'Orders >=100 ship free.', author: 'author', revision: 'a'.repeat(40),
   files: [{ filename: 'calculator.js', patch: '+ return amount >= 100 ? 0 : 5;' }], existingTests: [{ path: 'calculator.test.js' }], comments: [] };

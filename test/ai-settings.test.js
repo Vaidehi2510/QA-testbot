@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { DEFAULT_AI_CONFIG, AI_ROLES, validateAIConfig, modelEligibility, modelForRole } = require('../src/ai/settings');
+const { DEFAULT_AI_CONFIG, AI_ROLES, validateAIConfig, modelEligibility, modelForRole, validateLocalConfig, validateLocalEndpoint } = require('../src/ai/settings');
 
 const textModel = { id: 'example/text', inputModalities: ['text'], outputModalities: ['text'], supportedParameters: ['tools'], contextLength: 32000, maxCompletionTokens: 4000 };
 const visionModel = { ...textModel, id: 'example/vision', inputModalities: ['text', 'image'] };
@@ -67,4 +67,35 @@ test('normalized settings do not mutate frozen defaults or caller-owned arrays',
 test('configured output token limits must fit selected model context and completion bounds', () => {
   assert.throws(() => validateAIConfig({ model: textModel.id, maxOutputTokens: 5000 }, { models: [textModel] }), /exceeds the model limit/);
   assert.throws(() => validateAIConfig({ model: textModel.id }, { models: [{ ...textModel, contextLength: 2000 }] }), /insufficient context/);
+});
+
+const localProfile = { id: 'qa-model:8b', contextLength: 32768, tools: true, vision: false };
+
+test('local settings support tagged and slash IDs without relaxing cloud model validation', () => {
+  const result = validateAIConfig({ backend: 'local', enabled: true, model: localProfile.id, local: { models: [localProfile] } });
+  assert.equal(result.backend, 'local');
+  assert.equal(result.local.baseUrl, 'http://127.0.0.1:11434/v1');
+  assert.throws(() => validateAIConfig({ model: localProfile.id }), /OpenRouter model ID/);
+  assert.equal(validateAIConfig({ backend: 'local', model: 'studio/model:quant', local: { models: [{ ...localProfile, id: 'studio/model:quant' }] } }).model, 'studio/model:quant');
+  assert.throws(() => validateAIConfig({ backend: 'local', model: 'not-profiled' }), /absent/);
+  assert.throws(() => validateAIConfig({ backend: 'local', enabled: true }), /Select a local model/);
+  result.local.models[0].tools = false;
+  assert.equal(localProfile.tools, true);
+  assert.deepEqual(DEFAULT_AI_CONFIG.local.models, []);
+});
+
+test('local endpoints only allow literal loopback /v1 endpoints without URL bypasses', () => {
+  assert.equal(validateLocalEndpoint('http://127.0.0.1:11434/v1/'), 'http://127.0.0.1:11434/v1');
+  assert.equal(validateLocalEndpoint('https://[::1]:1234/v1'), 'https://[::1]:1234/v1');
+  for (const url of ['https://openrouter.ai/api/v1', 'http://localhost:11434/v1', 'http://127.1/v1', 'http://2130706433/v1', 'http://127.0.0.1.evil/v1', 'http://user:password@127.0.0.1/v1', 'http://127.0.0.1/v1?next=external', 'http://127.0.0.1/v1#fragment', 'http://127.0.0.1:0/v1', 'http://127.0.0.1:65536/v1', 'http://127.0.0.1/%76%31', 'http://127.0.0.1/other/../v1', 'file:///v1', 'http://[::ffff:127.0.0.1]/v1']) assert.throws(() => validateLocalEndpoint(url), /local.baseUrl/);
+});
+
+test('local profiles require declared actual context/tools/vision and enforce selected capabilities', () => {
+  for (const profile of [{ id: 'model' }, { ...localProfile, tools: undefined }, { ...localProfile, vision: undefined }, { ...localProfile, contextLength: 0 }, { ...localProfile, contextLength: 1.5 }, { ...localProfile, maxCompletionTokens: 40000 }, { ...localProfile, apiKey: 'secret' }, { ...localProfile, id: 'https://cloud/model' }]) assert.throws(() => validateLocalConfig({ models: [profile] }));
+  assert.throws(() => validateLocalConfig({ models: [localProfile, localProfile] }), /distinct/);
+  assert.throws(() => validateLocalConfig({ apiKey: 'secret' }), /LOCAL_MODEL_API_KEY/);
+  assert.throws(() => validateAIConfig({ backend: 'local', model: localProfile.id, local: { models: [{ ...localProfile, tools: false }] } }), /Tool calling/);
+  assert.throws(() => validateAIConfig({ backend: 'local', model: localProfile.id, allowImages: true, local: { models: [localProfile] } }), /Image input/);
+  assert.throws(() => validateAIConfig({ backend: 'local', model: localProfile.id, local: { models: [{ ...localProfile, contextLength: 2048 }] } }), /insufficient context/);
+  assert.throws(() => validateAIConfig({ backend: 'local', model: localProfile.id, local: { models: [{ ...localProfile, maxCompletionTokens: 2048 }] } }), /model limit/);
 });

@@ -32,7 +32,9 @@ concurrency:
 
 jobs:
   reconcile:
-    runs-on: ubuntu-latest
+    # A dedicated controller runner can reach its own loopback model server.
+    # Untrusted target tests remain on separate GitHub-hosted execution runners.
+    runs-on: ${{ vars.QA_CONTROLLER_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     environment: qa-control
     steps:
@@ -68,5 +70,6 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_DRIVE_ACCESS_TOKEN: ${{ secrets.GOOGLE_DRIVE_ACCESS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LOCAL_MODEL_API_KEY: ${{ secrets.LOCAL_MODEL_API_KEY }}
           DRIVE_FOLDER_ID: ${{ vars.DRIVE_FOLDER_ID }}
           DRIVE_SHARED_DRIVE_ID: ${{ vars.DRIVE_SHARED_DRIVE_ID }}
