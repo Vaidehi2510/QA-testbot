@@ -1,108 +1,225 @@
-// The every-few-minutes sync. Updates each PR's label, alerts Slack about new
-// PRs (once each), and writes the coverage dashboard.
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const { generatePlan } = require('./planner');
+const { deriveOutcome } = require('./core');
+const { routeRequest } = require('./decisions');
+const { GitHubStore } = require('./state');
+const { assessPR, isCurrent, completeRun, ingestDecisions, digest, queueEffect, deliverEffect, archiveCompletion } = require('./lifecycle');
+const github = require('./github');
+const { dispatchExecution } = require('./dispatch');
+const { DriveAdapter } = require('./drive');
+const { SlackAdapter, completionMessage, requestMessage } = require('./slack');
+const { renderReport } = require('./report');
 
-const fs = require('fs');
-const path = require('path');
-const { buildCoverage, prLabel } = require('./core.js');
-const { getClient, fetchReleasePRs, upsertComment } = require('./github.js');
-const { newPrMessage, planMessage, postMessage } = require('./slack.js');
-const { generatePlan } = require('./planner.js');
+function executionRequest(run, config) {
+  return { plan: run.plan, config, metadata: { repository: run.repository, prNumber: run.pr.number,
+    revision: run.revision, environment: run.environment, runId: run.runId, attempt: run.attempt } };
+}
 
-async function main() {
-  const root = path.join(__dirname, '..');
-  const config = JSON.parse(fs.readFileSync(path.join(root, 'qa-config.json'), 'utf8'));
-  const roster = JSON.parse(fs.readFileSync(path.join(root, 'roster.json'), 'utf8'));
-
-  const owner = process.env.TARGET_OWNER;
-  const repo = process.env.TARGET_REPO;
-  const appId = process.env.APP_ID;
-  const privateKey = (process.env.APP_PRIVATE_KEY || '').replace(/\\n/g, '\n');
-  const dryRun = process.env.DRY_RUN === 'true';
-  if (!owner || !repo || !appId || !privateKey) {
-    throw new Error('Missing TARGET_OWNER, TARGET_REPO, APP_ID or APP_PRIVATE_KEY.');
+// Dependencies are injected so the same state machine runs in offline integration tests.
+async function reconcile({ state, save, config, rules, people, prs, workflows = [], integrations, dryRun = false,
+  rerunToken = '', prNumber, retryIntegrations = false, log = console.log }) {
+  if (dryRun) { state = structuredClone(state); save = async () => {}; }
+  if (retryIntegrations && !dryRun) for (const e of Object.values(state.effects)) {
+    if (e.status === 'exhausted') { e.status = 'pending'; e.attempts = 0; delete e.nextAttemptAt; }
   }
-
-  const gh = await getClient({ appId, privateKey, owner, repo });
-  const prs = await fetchReleasePRs(gh, owner, repo, config);
-  const coverage = buildCoverage(prs, roster, config);
-
-  // Update labels on open PRs: qa-complete once everyone has reviewed, else needs-qa.
-  for (const pr of prs.filter((p) => p.state === 'open')) {
-    const row = coverage.prRows.find((r) => r.number === pr.number);
-    if (!row) continue;
-    const want = prLabel(row, config);
-    const other = want === config.completeLabel ? config.needsQaLabel : config.completeLabel;
-    if (dryRun) continue;
-    if (!pr.labels.includes(want)) await gh.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: [want] });
-    if (pr.labels.includes(other)) {
-      try { await gh.rest.issues.removeLabel({ owner, repo, issue_number: pr.number, name: other }); } catch { /* already gone */ }
-    }
+  if (retryIntegrations && !dryRun) for (const run of Object.values(state.runs)) {
+    if (run.collectionExhausted) { run.collectionAttempts = {}; run.collectionExhausted = false; run.resultCollectionPending = true; }
   }
-
-  // Alert Slack about new PRs — once each.
-  const webhook = process.env.SLACK_WEBHOOK_URL;
-  if (webhook) {
-    const statePath = path.join(process.cwd(), 'state', 'announced.json');
-    let announced = [];
-    try { announced = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch { announced = []; }
-    const seen = new Set(announced);
-    for (const row of coverage.prRows) {
-      const key = `pr:${row.number}`;
-      if (seen.has(key)) continue;
-      if (!dryRun) {
-        try { await postMessage(webhook, newPrMessage(row, roster)); } catch (e) { console.error(`Slack failed for #${row.number}: ${e.message}`); }
-      }
-      seen.add(key);
-    }
-    fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    fs.writeFileSync(statePath, JSON.stringify([...seen].slice(-1000), null, 2) + '\n');
-  }
-
-  // Generate and post a QA plan per PR — once each, unless the PR changed.
-  const rules = JSON.parse(fs.readFileSync(path.join(root, 'qa-rules.json'), 'utf8'));
-  const planStatePath = path.join(process.cwd(), 'state', 'plans.json');
-  let planState = {};
-  try { planState = JSON.parse(fs.readFileSync(planStatePath, 'utf8')); } catch { planState = {}; }
-
   for (const pr of prs) {
-    const plan = generatePlan(pr, rules);
-    if (planState[pr.number] === plan.fingerprint) continue; // unchanged → skip
-    const changed = planState[pr.number] !== undefined;
-    if (!dryRun) {
-      await upsertComment(gh, owner, repo, pr.number, '<!-- qa-plan:auto -->', plan.markdown);
-      if (webhook) {
-        try { await postMessage(webhook, planMessage(pr, plan, changed)); } catch (e) { console.error(`Slack plan post failed for #${pr.number}: ${e.message}`); }
-      }
-      const plansDir = path.join(process.cwd(), 'plans');
-      fs.mkdirSync(plansDir, { recursive: true });
-      fs.writeFileSync(path.join(plansDir, `pr-${pr.number}.md`), plan.markdown);
-      planState[pr.number] = plan.fingerprint;
+    const plan = generatePlan(pr, rules, config);
+    // A one-time rerun must remain current when the next scheduled poll omits its token.
+    const previous = state.runs[state.prs[`${pr.repository}#${pr.number}`]?.currentRunKey];
+    const applicableToken = !prNumber || Number(prNumber) === pr.number ? rerunToken : '';
+    const assessment = !applicableToken && previous?.revision === pr.revision && previous?.plan.fingerprint === plan.fingerprint
+      ? { run: previous, created: false } : assessPR(state, pr, plan, config, { rerunToken: applicableToken });
+    const { run, created } = assessment;
+    // A historical token must not restore an older run; process the actual current run.
+    const current = state.runs[state.prs[`${pr.repository}#${pr.number}`].currentRunKey];
+    ingestDecisions(state, current, pr.comments || [], config);
+    if (created) {
+      run.request = executionRequest(run, config);
+      queueEffect(state, `${run.key}:dispatch`, 'dispatch', run.key);
+      queueEffect(state, `${run.key}:plan`, 'plan', run.key);
+      log(`QA assessment ${pr.repository}#${pr.number} @ ${pr.revision.slice(0, 12)}: ${plan.checks.length} checks`);
     }
   }
-  if (!dryRun) {
-    fs.mkdirSync(path.dirname(planStatePath), { recursive: true });
-    fs.writeFileSync(planStatePath, JSON.stringify(planState, null, 2) + '\n');
+  await save(state);
+  for (const workflow of workflows) {
+    if (workflow.event !== 'workflow_dispatch' || !String(workflow.path || '').split('@')[0].endsWith('.github/workflows/qa-execute.yml')) continue;
+    const key = String(workflow.display_title || '').match(/^QA execution ([a-f0-9]{64})$/)?.[1];
+    const run = state.runs[key];
+    if (!run || (run.actionsRunId && String(run.actionsRunId) !== String(workflow.id))) continue;
+    run.actionsRunId = String(workflow.id);
+    if (workflow.status !== 'completed') {
+      if (!run.actionsAttempt || Number(workflow.run_attempt) > run.actionsAttempt) {
+        archiveCompletion(run);
+        run.phase = 'running'; run.results = []; run.actionsAttempt = Number(workflow.run_attempt);
+        run.attemptStartedAt = workflow.run_started_at || new Date().toISOString();
+        run.outcome = deriveOutcome(run.plan, [], run.decisions, run.revision);
+      }
+      continue;
+    }
+    const completionEvent = `${workflow.id}:${workflow.run_attempt}`;
+    if (run.completionEvent === completionEvent && !run.resultCollectionPending) continue;
+    run.collectionAttempts ||= {};
+    const attempts = run.collectionAttempts[completionEvent] || 0;
+    if (attempts >= (config.maxIntegrationAttempts || 5)) { run.collectionExhausted = true; continue; }
+    run.collectionAttempts[completionEvent] = attempts + 1;
+    let envelope;
+    try { envelope = await integrations.readResults(workflow, key); }
+    catch (error) { run.collectionError = String(error.message).slice(0, 300); }
+    completeRun(state, key, envelope, workflow);
+    if (envelope) { delete run.collectionError; run.collectionExhausted = false; }
   }
+  // A lost dispatch, expired artifact, or interrupted preparation becomes an error.
+  // It must not leave an indefinite apparent success or silently redispatch PR code.
+  for (const run of Object.values(state.runs)) {
+    if (['queued', 'running'].includes(run.phase) && Date.now() - Date.parse(run.attemptStartedAt || run.createdAt) > (config.dispatchTimeoutMinutes || 45) * 60000) {
+      completeRun(state, run.key, null, { id: run.actionsRunId || `missing-${run.key}`, run_attempt: run.actionsAttempt || 1,
+        status: 'completed', conclusion: 'timed_out', html_url: run.evidenceUrl });
+    }
+  }
+  await save(state);
 
-  fs.mkdirSync(path.join(process.cwd(), 'docs'), { recursive: true });
-  fs.writeFileSync(path.join(process.cwd(), 'docs', 'QA_DASHBOARD.md'), renderDashboard(coverage));
-  console.log(`Coverage: ${coverage.fullyCovered}/${coverage.totalPRs} PRs reviewed by everyone.`);
+  const deliver = (effect, fn) => {
+    if (dryRun) log(`[DRY RUN] Preview ${effect.type} for ${effect.runKey.slice(0, 12)}`);
+    return deliverEffect(state, effect, fn, save, { dryRun, maxAttempts: config.maxIntegrationAttempts || 5 });
+  };
+  const completedKeys = new Set(workflows.filter(w => w.status === 'completed').map(w => String(w.display_title).replace('QA execution ', '')));
+  const orderedRuns = Object.values(state.runs).sort((a, b) => Number(completedKeys.has(b.key)) - Number(completedKeys.has(a.key)));
+  for (const run of orderedRuns) {
+    let current = isCurrent(state, run);
+    // Check the live head immediately before publishing. Commit status is also SHA-bound.
+    if (current && integrations.currentRevision) current = await integrations.currentRevision(run) === run.revision;
+    const version = digest([run.results, run.decisions, run.phase, run.actionsAttempt]);
+    const reportVersion = digest([version, run.supersededAt, (run.completionHistory || []).map(h =>
+      [h.event, h.snapshot?.report.status, h.snapshot?.report.url])]);
+    if (current) {
+      for (const type of ['plan', 'dispatch']) {
+        const effect = state.effects[`${run.key}:${type}`];
+        if (!effect) continue;
+        if (type === 'dispatch') {
+          if (run.phase === 'completed') continue;
+          await deliver(effect, async () => {
+            if (run.actionsRunId) return { status: 'sent', recovered: true, id: run.actionsRunId };
+            await integrations.putRequest(run.key, run.request);
+            return integrations.dispatch(run.key);
+          });
+        } else await deliver(effect, () => integrations.plan(run));
+      }
+      for (const request of run.requests.filter(r => r.status === 'open')) {
+        const check = run.plan.checks.find(c => c.id === request.checkId);
+        const routing = routeRequest(check, { ...run.pr, revision: run.revision }, people, config);
+        request.routing = routing;
+        const e = queueEffect(state, `${run.key}:question:${check.id}`, 'question', run.key);
+        await deliver(e, () => integrations.slack.send(requestMessage(check, { ...run.pr, revision: run.revision }, routing), { key: e.key }));
+      }
+      const status = queueEffect(state, `${run.key}:status:${version}`, 'status', run.key);
+      await deliver(status, () => integrations.status(run));
+    }
+    if (run.phase !== 'completed') continue;
+    run.report.markdown = renderReport(run); // Retain the exact report even when Drive is unavailable.
+    if (dryRun) { log(run.report.markdown); if (current) log(completionMessage(run)); }
+    // Publish completion before attempting Drive I/O, which may be unavailable.
+    // A second, deduplicated message supplies the link after a successful upload.
+    const notification = current ? queueEffect(state, `${run.key}:completion:${version}`, 'completion', run.key) : null;
+    if (notification) await deliver(notification, async () => {
+      const receipt = await integrations.slack.send(completionMessage(run), { key: notification.key });
+      return { ...receipt, reportUrl: run.report.status === 'uploaded' ? run.report.url : undefined };
+    });
+    const report = queueEffect(state, `${run.key}:report:${reportVersion}`, 'report', run.key);
+    await deliver(report, async () => {
+      const result = await integrations.drive.upsertReport(run, { current });
+      // Keep checkpointed file IDs and the retained markdown across partial failures.
+      Object.assign(run.report, result);
+      return result;
+    });
+    if (!current) continue;
+    if (run.report.status === 'uploaded' && notification.status === 'done' && !notification.receipt?.reportUrl) {
+      const link = queueEffect(state, `${run.key}:report-link:${version}`, 'report-link', run.key);
+      await deliver(link, () => integrations.slack.send(`QA report available for ${run.repository}#${run.pr.number} at ${run.revision.slice(0, 12)}: ${run.report.url}`, { key: link.key }));
+    }
+  }
+  // Retry archived uploads after current completion notifications.
+  for (const run of orderedRuns) for (const historical of run.completionHistory || []) {
+    const snapshot = historical.snapshot;
+    if (!snapshot || snapshot.report.status === 'uploaded') continue;
+    const effect = queueEffect(state, `${run.key}:archived-report:${historical.event}`, 'report', run.key);
+    await deliver(effect, async () => {
+      const result = await integrations.drive.upsertReport(snapshot, { current: false });
+      Object.assign(snapshot.report, result);
+      return result;
+    });
+  }
+  await save(state);
+  return state;
 }
 
-function renderDashboard(c) {
-  const L = [];
-  L.push(`# QA coverage — ${c.release}`, '');
-  L.push(`_Updated ${new Date().toISOString()} · ${c.fullyCovered}/${c.totalPRs} PRs reviewed by everyone_`, '');
-  L.push(c.complete ? '**All PRs reviewed by everyone ✅**' : '**Reviews still outstanding ⏳**', '');
-  L.push('## By PR', '', '| PR | Reviewed by | Still missing |', '| --- | --- | --- |');
-  for (const p of c.prRows) {
-    L.push(`| #${p.number} ${p.title} | ${p.reviewedBy.map((x) => '@' + x).join(', ') || '—'} | ${p.missing.map((x) => '@' + x).join(', ') || '✅ none'} |`);
+async function main(env = process.env) {
+  const root = path.join(__dirname, '..');
+  const [config, rules, people] = await Promise.all(['qa-config.json', 'qa-rules.json', 'people.json'].map(async filename => JSON.parse(await fs.readFile(path.join(root, filename), 'utf8'))));
+  const dryRun = env.DRY_RUN !== 'false';
+  const enabled = config.enabled || env.QA_ENABLED === 'true';
+  if (!enabled && !dryRun) throw new Error('Activation disabled. Set QA_ENABLED=true after configuring the isolated environment, or use DRY_RUN=true.');
+  if (!env.TARGET_OWNER || !env.TARGET_REPO || !env.BOT_REPOSITORY || !env.GITHUB_TOKEN || !(env.APP_ID || env.QA_APP_ID) || !(env.APP_PRIVATE_KEY || env.QA_APP_PRIVATE_KEY)) {
+    throw new Error('Sync needs TARGET_OWNER, TARGET_REPO, BOT_REPOSITORY, GITHUB_TOKEN and GitHub App credentials. Run npm run demo for the credential-free workflow.');
   }
-  L.push('', '## By intern', '', '| Intern | Done | Missing |', '| --- | --- | --- |');
-  for (const i of c.interns) {
-    L.push(`| @${i.github} | ${i.done.length}/${c.totalPRs} | ${i.missing.map((n) => '#' + n).join(', ') || '✅ none'} |`);
-  }
-  return L.join('\n') + '\n';
+  const [owner, repo] = env.BOT_REPOSITORY.split('/');
+  const target = { owner: env.TARGET_OWNER, repo: env.TARGET_REPO };
+  const [gh, bot] = await Promise.all([
+    github.getClient({ ...target, appId: env.APP_ID || env.QA_APP_ID, privateKey: (env.APP_PRIVATE_KEY || env.QA_APP_PRIVATE_KEY).replace(/\\n/g, '\n') }),
+    github.getClient({ token: env.GITHUB_TOKEN }),
+  ]);
+  const store = new GitHubStore({ gh: bot, owner, repo, branch: config.stateBranch, baseRef: config.executionRef, dryRun });
+  return store.withLock(async (state, save) => {
+    const tracked = Object.keys(state.prs).filter(k => k.startsWith(`${target.owner}/${target.repo}#`)).map(k => Number(k.split('#')[1]));
+    let prs, workflows;
+    // Completion events inspect only their associated PR before notifying; the
+    // scheduled path performs the full scan and recovers lost completion events.
+    if (env.COMPLETED_RUN_ID) {
+      const { data } = await bot.rest.actions.getWorkflowRun({ owner, repo, run_id: Number(env.COMPLETED_RUN_ID) });
+      workflows = [data];
+      const key = String(data.display_title || '').match(/^QA execution ([a-f0-9]{64})$/)?.[1];
+      const run = state.runs[key];
+      prs = run?.repository === `${target.owner}/${target.repo}` ? [await github.fetchPR(gh, target.owner, target.repo, run.pr.number, config)] : [];
+    } else {
+      [prs, workflows] = await Promise.all([
+        github.fetchReleasePRs(gh, target.owner, target.repo, config, tracked),
+        github.workflowRuns(bot, owner, repo),
+      ]);
+    }
+    const drive = new DriveAdapter({ ...config.drive, folderId: env.DRIVE_FOLDER_ID || config.drive?.folderId,
+      sharedDriveId: env.DRIVE_SHARED_DRIVE_ID || config.drive?.sharedDriveId,
+      credentials: env.GOOGLE_SERVICE_ACCOUNT_JSON ? JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON) : undefined,
+      accessToken: env.GOOGLE_DRIVE_ACCESS_TOKEN || env.GOOGLE_ACCESS_TOKEN, dryRun, onCheckpoint: () => save(state) });
+    const slack = new SlackAdapter({ webhookUrl: env.SLACK_WEBHOOK_URL, botToken: env.SLACK_BOT_TOKEN, channelId: env.SLACK_CHANNEL_ID, dryRun });
+    const integrations = {
+      drive, slack,
+      putRequest: (key, request) => store.putRequest(key, request),
+      dispatch: key => dispatchExecution({ gh: bot, owner, repo, requestKey: key, ref: config.executionRef, dryRun, enabled }),
+      readResults: (workflow, key) => github.readResultsArtifact(bot, owner, repo, workflow, key),
+      currentRevision: async run => run.repository === `${target.owner}/${target.repo}`
+        ? (await gh.rest.pulls.get({ ...target, pull_number: run.pr.number })).data.head.sha : null,
+      plan: run => github.upsertComment(gh, target.owner, target.repo, run.pr.number, '<!-- qa-plan:auto -->', `${run.plan.markdown}\n\nTested revision: \`${run.revision}\`.\nHuman responses: \`/qa-tested check:<id> revision:${run.revision} result:pass|fail reason:<explanation>\`.`, { dryRun }),
+      status: async run => {
+        if (!dryRun) {
+          const outcome = run.outcome.status;
+          await gh.rest.repos.createCommitStatus({ ...target, sha: run.revision, context: 'qa-bot',
+            state: outcome === 'passed' ? 'success' : outcome === 'failed' ? 'failure' : outcome === 'execution_error' ? 'error' : 'pending',
+            description: `QA ${outcome}; attempt ${run.attempt}`.slice(0, 140), target_url: run.evidenceUrl || run.pr.url });
+        }
+        return github.updateLabels(gh, target.owner, target.repo, run.pr.number, run.outcome, config, { dryRun });
+      },
+    };
+    if (dryRun) {
+      const send = slack.send.bind(slack);
+      slack.send = async (...args) => { const preview = await send(...args); console.log('[DRY RUN Slack]', args[0]); return preview; };
+      console.log('[DRY RUN] GitHub writes, workflow dispatch, Drive upload, Slack posting, and durable state changes are disabled.');
+    }
+    return reconcile({ state, save, config, rules, people, prs, workflows, integrations, dryRun,
+      rerunToken: env.QA_RERUN_TOKEN || '', prNumber: env.PR_NUMBER, retryIntegrations: env.RETRY_INTEGRATIONS === 'true' });
+  });
 }
-
-main().catch((err) => { console.error(err); process.exit(1); });
+if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
+module.exports = { main, reconcile, executionRequest };

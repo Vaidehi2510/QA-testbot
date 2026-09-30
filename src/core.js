@@ -1,60 +1,41 @@
-// Pure logic for the "everyone reviews every PR" model. No I/O, no deps.
-// Given the release PRs and the intern roster, it works out who has reviewed
-// what, and who is still missing which PRs.
+// QA is derived exclusively from structured check outcomes and authorized decisions.
+const STATUSES = ['passed', 'failed', 'skipped', 'blocked', 'execution_error', 'awaiting_human'];
 
-function parseSignoff(body, command) {
-  return body && body.includes(command) ? true : false;
-}
-
-// The set of intern GitHub logins who have QA'd this PR — either by leaving a
-// formal review (approve / request changes) or a /qa-tested comment.
-function reviewersOf(pr, config) {
-  const set = new Set();
-  for (const r of pr.reviews || []) {
-    if (['APPROVED', 'CHANGES_REQUESTED'].includes(r.state) && r.user) set.add(r.user);
+function deriveOutcome(plan, results = [], decisions = [], revision) {
+  const counts = Object.fromEntries(STATUSES.map((status) => [status, 0]));
+  const pending = [];
+  const checkResults = [];
+  const requiredStatuses = [];
+  const automatedStatuses = [];
+  for (const check of plan.checks || []) {
+    let status;
+    let source;
+    if (check.method === 'human') {
+      // The recording boundary enforces authorization. Only the exact revision applies.
+      source = decisions.filter((decision) => !decision.invalidatedAt && decision.checkId === check.id && decision.revision === revision)
+        .sort((left, right) => (Date.parse(left.timestamp) || 0) - (Date.parse(right.timestamp) || 0)).at(-1);
+      status = source?.result === 'pass' ? 'passed' : source?.result === 'fail' ? 'failed' : 'awaiting_human';
+    } else if (check.method === 'automated') {
+      const matches = results.filter((result) => result.checkId === check.id && (!result.revision || result.revision === revision));
+      // Duplicate/conflicting reports are an ingestion error, never an opportunity to choose a pass.
+      source = matches[0];
+      status = matches.length > 1 ? 'execution_error' : source ?
+        STATUSES.includes(source.status) && source.status !== 'awaiting_human' ? source.status : 'execution_error' : 'blocked';
+      automatedStatuses.push(status);
+    } else status = 'blocked';
+    counts[status]++;
+    checkResults.push({ checkId: check.id, status, ...(source ? { source } : {}) });
+    if (check.required !== false) {
+      requiredStatuses.push(status);
+      if (status !== 'passed') pending.push({ ...check, status });
+    }
   }
-  for (const c of pr.comments || []) {
-    if (parseSignoff(c.body, config.signoffCommand) && c.user) set.add(c.user);
+  // An empty plan cannot assert a successful test run.
+  let status = 'blocked';
+  if (requiredStatuses.length) {
+    status = ['failed', 'execution_error', 'blocked', 'skipped', 'awaiting_human'].find((candidate) => requiredStatuses.includes(candidate)) || 'passed';
   }
-  return set;
+  return { status, counts, automatedPassed: automatedStatuses.length > 0 && automatedStatuses.every((value) => value === 'passed'), pending, checkResults };
 }
 
-function inRelease(pr, config) {
-  const managed = [config.needsQaLabel, config.completeLabel];
-  return pr.milestone === config.releaseMilestone || (pr.labels || []).some((l) => managed.includes(l));
-}
-
-// Build the full coverage picture: per-PR and per-intern.
-function buildCoverage(prs, roster, config) {
-  const releasePRs = prs.filter((p) => inRelease(p, config));
-  const logins = roster.map((r) => r.github);
-
-  const prRows = releasePRs.map((pr) => {
-    const reviewed = reviewersOf(pr, config);
-    const reviewedBy = logins.filter((g) => reviewed.has(g));
-    const missing = logins.filter((g) => !reviewed.has(g));
-    return { number: pr.number, title: pr.title, url: pr.url, state: pr.state, reviewedBy, missing, complete: missing.length === 0 };
-  });
-
-  const interns = roster.map((person) => {
-    const done = prRows.filter((p) => p.reviewedBy.includes(person.github)).map((p) => p.number);
-    const missing = prRows.filter((p) => p.missing.includes(person.github)).map((p) => p.number);
-    return { ...person, done, missing, complete: missing.length === 0 };
-  });
-
-  return {
-    release: config.releaseMilestone,
-    totalPRs: prRows.length,
-    fullyCovered: prRows.filter((p) => p.complete).length,
-    complete: prRows.length > 0 && prRows.every((p) => p.complete),
-    prRows,
-    interns,
-  };
-}
-
-// A PR is "done" only when every intern has reviewed it.
-function prLabel(prRow, config) {
-  return prRow.complete ? config.completeLabel : config.needsQaLabel;
-}
-
-module.exports = { parseSignoff, reviewersOf, inRelease, buildCoverage, prLabel };
+module.exports = { deriveOutcome, STATUSES };

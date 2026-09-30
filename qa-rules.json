@@ -2,82 +2,64 @@
   {
     "id": "ui",
     "label": "UI / Frontend",
-    "match": ["\\.tsx$", "\\.jsx$", "^frontend/", "/components/"],
-    "testSteps": [
-      "Open the affected screens and confirm they render correctly",
-      "Check the layout on both desktop and mobile widths",
-      "Verify buttons, forms, and links behave as expected"
-    ],
-    "regression": ["Previously working pages still render", "Shared components are not broken"],
-    "expected": ["No visual regressions", "Interactive elements respond correctly"]
+    "match": ["\\.tsx$", "\\.jsx$", "^frontend/", "/components/", "\\.css$"],
+    "journeys": ["Open the affected screen, complete its primary action, and recover from invalid input"],
+    "checks": [
+      {"id": "interaction", "runner": "ui-tests", "reason": "Changed UI can alter navigation and form interaction.", "expected": "Configured interaction assertions pass, including invalid input and keyboard navigation.", "requirement": "Target application's UI acceptance specifications"},
+      {"id": "visual", "method": "human", "kind": "subjective", "match": ["\\.css$", "\\.scss$"], "reason": "Subjective appearance requires a design judgment.", "expected": "The changed layout satisfies the intended design at agreed viewport sizes.", "question": "Does the changed layout satisfy the intended design on desktop and mobile, with readable content and no clipped controls? Cite screenshots and the design requirement."}
+    ]
   },
   {
     "id": "api",
     "label": "Backend / API",
     "match": ["^api/", "^routes/", "^controllers/", "^services/", "/api/"],
-    "testSteps": [
-      "Call the affected endpoints with valid input and confirm correct responses",
-      "Send invalid or missing input and confirm errors are handled",
-      "Check status codes and response shape"
-    ],
-    "regression": ["Related endpoints still respond correctly", "Unrelated API contracts are unchanged"],
-    "expected": ["Endpoints return correct data and status codes", "Errors are handled gracefully"]
+    "journeys": ["Submit valid input, reject invalid input, and handle dependency failure"],
+    "checks": [
+      {"id": "contracts", "runner": "api-tests", "reason": "Endpoint changes can affect response contracts and error handling.", "expected": "Configured contract, input-validation, and dependency-failure assertions pass.", "requirement": "Target application's API specification"}
+    ]
   },
   {
     "id": "auth",
     "label": "Authentication",
     "match": ["auth", "login", "session"],
-    "testSteps": [
-      "Verify login works with valid credentials",
-      "Verify login fails with invalid credentials",
-      "Verify logout clears the session",
-      "Verify session timeout behaves correctly"
-    ],
-    "regression": ["Existing login flow", "Password reset", "Session persistence across refresh"],
-    "expected": ["Users can log in and out", "Invalid logins are rejected", "Sessions expire as configured"]
+    "patchMatch": ["[+-].*\\b(authenticate|authorize|permission|session)\\b"],
+    "journeys": ["Log in, access an allowed resource, deny a forbidden resource, expire the session, and log out"],
+    "checks": [
+      {"id": "access", "runner": "auth-tests", "reason": "Authentication or authorization changes can affect access boundaries.", "expected": "Configured valid-login, invalid-login, expired-session, allowed-role, and denied-role assertions pass.", "requirement": "Target application's authentication and role policy"}
+    ]
   },
   {
     "id": "payments",
     "label": "Payments / Billing",
     "match": ["payments", "billing", "pricing"],
-    "testSteps": [
-      "Run a test transaction end to end",
-      "Verify totals, taxes, and currency are correct",
-      "Verify declined or failed payments are handled"
-    ],
-    "regression": ["Existing checkout flow", "Invoice / receipt generation", "Refund handling"],
-    "expected": ["Payments process correctly", "Amounts are accurate", "Failures are handled safely"]
+    "journeys": ["Calculate a total, complete synthetic checkout, handle a decline, and retry without duplicate charges"],
+    "checks": [
+      {"id": "synthetic-checkout", "runner": "payments-tests", "reason": "Payment logic requires deterministic synthetic regression coverage.", "expected": "Configured amount, decline, duplicate-request, and refund assertions pass using synthetic data.", "requirement": "Target application's billing specification"}
+    ]
   },
   {
     "id": "database",
     "label": "Database",
     "match": ["migrations/", "schema", "database"],
-    "testSteps": [
-      "Apply the migration on a copy of the data and confirm it runs cleanly",
-      "Verify reads and writes still work after the change",
-      "Confirm the migration can roll back if supported"
-    ],
-    "regression": ["Existing queries return correct data", "No data loss during migration"],
-    "expected": ["Migration applies without errors", "Data integrity is preserved"]
+    "journeys": ["Migrate disposable synthetic data, read and write it, and validate the supported rollback behavior"],
+    "checks": [
+      {"id": "migration", "runner": "database-tests", "reason": "Schema changes may affect data integrity and existing queries.", "expected": "Configured migration, read/write, integrity, and supported rollback assertions pass in a disposable environment.", "requirement": "Target application's schema compatibility policy"}
+    ]
   },
   {
     "id": "deployment",
     "label": "Deployment / Infra",
     "match": ["^config/", "deployment", "infrastructure", "Dockerfile"],
-    "testSteps": [
-      "Deploy to a staging environment",
-      "Run a smoke test: the app boots and core pages load",
-      "Check the logs for startup errors"
-    ],
-    "regression": ["App starts cleanly", "Environment variables and secrets resolve"],
-    "expected": ["Service comes up healthy", "No new startup errors"]
+    "journeys": ["Start the application in an isolated environment and exercise its health endpoint"],
+    "checks": [
+      {"id": "smoke", "runner": "smoke-tests", "reason": "Deployment changes can prevent startup or readiness.", "expected": "Configured startup and readiness assertions pass without production credentials.", "requirement": "Target application's readiness contract"}
+    ]
   },
   {
     "id": "tests",
     "label": "Test suite",
-    "match": ["^tests/", "\\.test\\.", "\\.spec\\."],
-    "testSteps": ["Run the related test suite and confirm it passes", "Confirm new tests actually cover the change"],
-    "regression": ["The full test suite still passes"],
-    "expected": ["All tests are green"]
+    "match": ["^tests?/", "\\.test\\.", "\\.spec\\."],
+    "journeys": ["Run the changed assertions and essential regression suite"],
+    "checks": []
   }
 ]

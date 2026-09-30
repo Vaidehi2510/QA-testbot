@@ -1,6 +1,27 @@
 {
-  "releaseMilestone": "v1.4",
+  "enabled": false,
+  "executionRef": "main",
+  "stateBranch": "qa-state",
+  "environment": "synthetic-node22",
   "needsQaLabel": "needs-qa",
   "completeLabel": "qa-complete",
-  "signoffCommand": "/qa-tested"
+  "scope": { "label": "needs-qa", "milestone": null },
+  "decisionReviewers": [],
+  "featureOwners": {},
+  "qaGroupId": "",
+  "specificationPaths": [],
+  "maxIntegrationAttempts": 5,
+  "dispatchTimeoutMinutes": 45,
+  "drive": { "folderId": "", "sharedDriveId": "" },
+  "runners": [
+    {
+      "id": "node-tests",
+      "type": "node-test",
+      "baseline": true,
+      "files": ["test/*.test.js"],
+      "timeoutMs": 120000,
+      "expected": "All assertions in the configured baseline suite pass; at least one test executes.",
+      "requirement": "Trusted target test suite configured by the QA maintainer"
+    }
+  ]
 }

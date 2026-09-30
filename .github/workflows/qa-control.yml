@@ -1,0 +1,71 @@
+name: QA controller
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Optional PR number to scope an intentional rerun
+        required: false
+        type: string
+      rerun_token:
+        description: Unique token for an intentional rerun (reusing a token deduplicates)
+        required: false
+        type: string
+      retry_integrations:
+        description: Explicitly retry integrations whose bounded retries were exhausted
+        required: false
+        default: false
+        type: boolean
+  workflow_run:
+    workflows: [QA execution]
+    types: [completed]
+  schedule:
+    - cron: '*/10 * * * *'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: qa-controller
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: qa-control
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_run is privileged: only default-branch bot code is executed.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Reconcile PRs, executions, decisions, and integration outbox
+        run: node src/run.js
+        env:
+          MODE: ${{ github.event_name == 'workflow_run' && 'completion' || 'sync' }}
+          COMPLETED_RUN_ID: ${{ github.event.workflow_run.id }}
+          COMPLETED_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          GITHUB_TOKEN: ${{ github.token }}
+          BOT_REPOSITORY: ${{ github.repository }}
+          APP_ID: ${{ secrets.QA_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.QA_APP_PRIVATE_KEY }}
+          TARGET_OWNER: ${{ vars.TARGET_OWNER }}
+          TARGET_REPO: ${{ vars.TARGET_REPO }}
+          QA_ENABLED: ${{ vars.QA_ENABLED || 'false' }}
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          QA_RERUN_TOKEN: ${{ inputs.rerun_token }}
+          RETRY_INTEGRATIONS: ${{ inputs.retry_integrations }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ vars.SLACK_CHANNEL_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_DRIVE_ACCESS_TOKEN: ${{ secrets.GOOGLE_DRIVE_ACCESS_TOKEN }}
+          DRIVE_FOLDER_ID: ${{ vars.DRIVE_FOLDER_ID }}
+          DRIVE_SHARED_DRIVE_ID: ${{ vars.DRIVE_SHARED_DRIVE_ID }}

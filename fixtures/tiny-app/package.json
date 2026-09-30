@@ -1,0 +1,5 @@
+{
+  "name": "qa-synthetic-fixture",
+  "private": true,
+  "scripts": { "test": "node --test --test-reporter=tap calculator.test.js" }
+}
