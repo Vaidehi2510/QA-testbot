@@ -6,7 +6,7 @@ const DEFAULT_EXCLUDES = /(^|\/)(?:\.git|node_modules|vendor|\.env(?:\.[^/]*)?|\
 function redact(value) {
   return String(value ?? '')
     .replace(/-----BEGIN [^-]*(?:PRIVATE KEY|CERTIFICATE)-----[\s\S]*?-----END [^-]+-----/g, '[REDACTED KEY MATERIAL]')
-    .replace(/\b(?:sk-or-v1-|sk-proj-|sk-ant-|ghp_|gho_|ghs_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{10,}/g, '[REDACTED TOKEN]')
+    .replace(/\b(?:sk-or-v1-|sk-proj-|sk-ant-|ghp_|gho_|ghs_|github_pat_|xox[baprs]-|pst_)[A-Za-z0-9_-]{10,}/g, '[REDACTED TOKEN]')
     .replace(/\bAKIA[A-Z0-9]{16}\b/g, '[REDACTED ACCESS KEY]')
     .replace(/((?:["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|authorization)["']?)\s*[=:]\s*)(["']?)[^\s"',;\n]{6,}\2/gi, '$1$2[REDACTED]$2')
     .replace(/\bBearer\s+[A-Za-z0-9_.+/=-]{8,}/gi, 'Bearer [REDACTED]')

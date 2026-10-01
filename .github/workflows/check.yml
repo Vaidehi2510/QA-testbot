@@ -1,0 +1,28 @@
+name: Bot verification
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node node_modules/playwright-core/cli.js install --with-deps chromium firefox webkit
+      - name: Unit and real browser integration tests
+        run: node --test --test-concurrency=4 test/*.test.js
+        env:
+          QA_AUTONOMY_BROWSER_TEST: '1'
+          QA_PORTAL_BROWSER_TEST: '1'
+      - run: npm run demo:web
+      - run: node src/web/demo-advanced.js

@@ -1,6 +1,6 @@
 {
   "name": "qa-signoff-bot",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "AI QA team with local/OpenRouter models, isolated tests, automated web preview audits, and PR reporting without product code writes.",
   "license": "MIT",
   "private": true,
@@ -16,12 +16,17 @@
     "test": "node --test test/*.test.js",
     "execute": "node src/execute.js",
     "qa:web": "node src/web/cli.js",
-    "demo:web": "node src/web/demo.js"
+    "demo:web": "node src/web/demo.js",
+    "qa:autonomous": "node src/autonomy/cli.js",
+    "qa:accept-baseline": "node src/web/visual.js",
+    "qa:native": "node src/native/cli.js",
+    "demo:web:advanced": "node src/web/demo-advanced.js"
   },
   "dependencies": {
     "@axe-core/playwright": "4.13.0",
     "@octokit/auth-app": "^7.1.3",
     "@octokit/rest": "^21.0.2",
-    "playwright-core": "1.63.0"
+    "playwright-core": "1.63.0",
+    "pngjs": "7.0.0"
   }
 }

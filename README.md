@@ -2,6 +2,10 @@
 
 A standalone QA bot with an optional **OpenRouter or local AI team**: browse models, assign specialists to test planning, code review, security, UI/UX, and failure triage, then run trusted test suites and report the evidence. A local dashboard manages models and shows findings, suggested fixes, candidate tests, and review costs.
 
+The [autonomous QA runner](docs/autonomous-qa.md) adds bounded browser discovery, generated declarative regression journeys grounded in trusted assertions, independent replay, retained tests, semantic selector maintenance, and explicit visual baselines. Chromium, Firefox, and WebKit are selectable. The [Patchsentry portal](https://patchsentry.vercel.app) can queue exact-revision work for an explicitly enrolled outbound runner. Product source stays read-only; browser/native infrastructure and business expectations must still be supplied.
+
+The [native adapter](docs/native-qa.md) runs explicit Android, iOS, and macOS journeys through an enrolled local Appium server on a disposable device or VM. It verifies a trusted build artifact against the requested revision before accepting evidence. Physical-device and native-driver verification require your provisioned environment.
+
 The GitHub App controller runs tests in isolated GitHub Actions jobs, saves reports to Google Drive, and asks specific human questions through Slack. Its deterministic workflow remains usable without AI or a paid model service. Platform usage limits and hosting costs still apply.
 
 The bot can comment, label, and report commit statuses on product PRs. It has no tool for editing product files, pushing fixes, or merging. Bot state, external browser suites, candidate tests, and reports stay in its separate workspace. See [testing a product without code changes](docs/product-qa.md).
@@ -81,7 +85,9 @@ Initial runners:
 | --- | --- | --- |
 | `node-test` | Node built-in tests, explicit files or relative globs | TAP produced by `node --test --test-reporter=tap` |
 | `npm-script` | A trusted named npm script running the application's suite | Complete TAP, `format: "tap"` |
-| `web-preview` | Bot-owned UI suite against an exact-revision disposable preview | Structured browser assertions, accessibility/layout findings, and screenshots |
+| `npm-script` with `format: "vitest-json"` | Existing Vitest suite, optionally in a configured relative `cwd` | Complete JSON with consistent assertion counts |
+| `go-test` | Trusted relative Go package paths | Completed `go test -json` package and test events |
+| `web-preview` | Bot-owned UI suite against an exact-revision disposable preview | Browser assertions, discovery, accessibility/layout findings, screenshots and optional visual differences |
 
 An example additional runner:
 
@@ -98,9 +104,9 @@ An example additional runner:
 }
 ```
 
-The default image supports dependency-free Node tests. Projects with dependencies need a reviewed image containing those dependencies at `/opt/qa/node_modules`. Configure `execution.image`, preferably with an immutable digest. No install hook runs against PR code with privileged credentials. Browser checks can use the bot-owned `web-preview` runner, or a configured TAP suite and reviewed browser image; both can supply screenshot evidence for the AI UI/UX reviewer. Native ESM dependency resolution, writable-checkout tests, service containers, JUnit, production data, network calls, and other languages require a separately reviewed extension; unsupported required checks remain blocked. Details and limits are in [docs/execution.md](docs/execution.md).
+The default image supports dependency-free Node tests. Projects with dependencies need a reviewed image containing those dependencies at `/opt/qa/node_modules`; Go suites need their toolchain and cached modules in the image. Configure `execution.image`, preferably with an immutable digest. No install hook runs against PR code with privileged credentials. Opt-in `execution.scratchWorktree` supports framework build files and ESM resolution in a disposable container copy while preserving the read-only source mount. Service containers, JUnit, production data, and external network calls remain unsupported. Details are in [test execution](docs/execution.md) and [autonomous QA](docs/autonomous-qa.md).
 
-Patch analysis identifies validation, authentication, authorization, error handling, and dynamic execution observations. These are heuristics, not a security audit or proof of correctness. Missing expectations, explicit `TBD`/`open question` text, and findings requiring interpretation produce targeted human checks. Default CSS changes select automated browser coverage rather than imposing routine manual visual sign-off. Contradictions can be made machine-detectable with `QA-EXPECT key: value` lines in descriptions/specs: different values for the same key create an owner question. The deterministic planner does not interpret arbitrary prose contradictions; optional AI reviewers can propose additional questions with explicit uncertainty. Test association is heuristic and gaps are included in reports. AI-generated tests remain candidates until their requirements and assertions are validated and they are added to an approved suite. The bot never executes model-supplied commands or silently applies suggested fixes.
+Patch analysis identifies validation, authentication, authorization, error handling, and dynamic execution observations. These are heuristics, not a security audit or proof of correctness. Missing expectations, explicit `TBD`/`open question` text, and findings requiring interpretation produce targeted human checks. Default CSS changes select automated browser coverage rather than imposing routine manual visual sign-off. Contradictions can be made machine-detectable with `QA-EXPECT key: value` lines in descriptions/specs: different values for the same key create an owner question. The deterministic planner does not interpret arbitrary prose contradictions; optional AI reviewers can propose additional questions with explicit uncertainty. Test association is heuristic and gaps are included in reports. Generated source-code tests remain inert candidates. The autonomous path can execute validated declarative journeys and retain them after two verified passes, preserving operator-owned assertions. The bot never executes model-supplied commands or silently applies suggested product fixes.
 
 For a check needing separately authorized access or external side effects, add a rule scenario with `method: "human"`, `kind: "access"`, a specific `question`, `reason`, and `expected` result. The request asks the configured owner to provide an authorized test result and evidence; the bot never grants itself external access or runs that action through a comment.
 

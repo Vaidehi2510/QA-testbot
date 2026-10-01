@@ -11,6 +11,74 @@ const MAX_SCREENSHOTS = 4;
 const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024;
 const MAX_SCREENSHOT_TOTAL_BYTES = 6 * 1024 * 1024;
 
+// This program runs inside the same secret-free, offline container. The product
+// mount remains read-only; build caches and ESM dependencies use disposable tmpfs.
+function scratchWorktree() {
+  const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
+  const request = JSON.parse(process.argv[1]);
+  fs.cpSync('/workspace', '/tmp/qa-workspace', { recursive: true, dereference: false });
+  const cwd = path.join('/tmp/qa-workspace', request.cwd || '.');
+  const dependencies = path.join(cwd, 'node_modules');
+  if (fs.existsSync('/opt/qa/node_modules')) {
+    if (fs.lstatSync(dependencies, { throwIfNoEntry: false })) throw new Error('Product source contains an unexpected dependency tree');
+    // Package code stays in the reviewed read-only image. The dependency root
+    // itself must be a real tmpfs directory: Vite writes .vite-temp beside the
+    // packages when bundling an ESM/TypeScript config.
+    fs.mkdirSync(dependencies);
+    const writableCaches = new Set(['.vite', '.vite-temp', '.vitest', '.cache']);
+    for (const name of fs.readdirSync('/opt/qa/node_modules')) {
+      const source = path.join('/opt/qa/node_modules', name), target = path.join(dependencies, name);
+      if (writableCaches.has(name)) continue;
+      if (name.startsWith('@') && fs.statSync(source).isDirectory()) {
+        fs.mkdirSync(target);
+        for (const member of fs.readdirSync(source)) fs.symlinkSync(path.join(source, member), path.join(target, member));
+      } else fs.symlinkSync(source, target);
+    }
+  }
+  const result = cp.spawnSync(request.command, request.args, { cwd, stdio: 'inherit', shell: false, env: process.env });
+  if (result.error) { process.stderr.write(result.error.message); process.exitCode = 1; }
+  else process.exitCode = result.status ?? 1;
+}
+
+// Vitest versions differ in their default JSON destination. A unique explicit
+// report file avoids mixing reporter announcements or test console output into
+// the structured result. This program executes inside the test container.
+function captureVitestReport() {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), cp = require('node:child_process');
+  const request = JSON.parse(process.argv[1]);
+  const maximum = 512 * 1024 - 1;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-vitest-report-'));
+  const original = fs.lstatSync(directory);
+  const report = path.join(directory, 'report.json');
+  let child, descriptor;
+  try {
+    child = cp.spawnSync('npm', ['--ignore-scripts', '--silent', 'run', request.script, '--', '--reporter=json', `--outputFile=${report}`], {
+      shell: false, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: maximum, env: process.env
+    });
+    if (child.error) throw new Error(`Vitest process failed: ${child.error.code || child.error.message}`);
+    if (child.signal) throw new Error(`Vitest process terminated by ${child.signal}`);
+    const current = fs.lstatSync(directory);
+    if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== original.dev || current.ino !== original.ino) throw new Error('Vitest report directory changed during execution.');
+    descriptor = fs.openSync(report, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size < 1 || stat.size > maximum) throw new Error('Vitest report must be a bounded regular file.');
+    const buffer = Buffer.alloc(maximum + 1);
+    const length = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
+    if (length !== stat.size) throw new Error('Vitest report changed size during collection.');
+    const payload = JSON.parse(buffer.subarray(0, length).toString('utf8'));
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Vitest report must be a JSON object.');
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+    process.exitCode = child.status ?? 1;
+  } catch (error) {
+    const diagnostics = [child?.stdout, child?.stderr].filter(Boolean).map(value => value.slice(-2000)).join('\n');
+    process.stderr.write(`Unable to collect Vitest JSON report: ${error.message}\n${diagnostics}`.slice(0, 5000));
+    process.exitCode = 1;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 // This fixed program runs in a separate trusted container. It never receives
 // repository code or a user-supplied command, and its sole mount is read-only.
 function readCaptureVolume() {
@@ -173,7 +241,7 @@ function collectScreenshots(directory, outputDir, { revision, checkId, remaining
 }
 
 function cleanEnvironment() {
-  return { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: '/tmp', TMPDIR: '/tmp', CI: 'true', NODE_ENV: 'test', LANG: 'C.UTF-8' };
+  return { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: '/tmp', TMPDIR: '/tmp', CI: 'true', NODE_ENV: 'test', LANG: 'C.UTF-8', GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
 }
 
 // The controller interprets a report only after the process has ended. A zero
@@ -207,6 +275,18 @@ function safeRelativeFile(filename) {
 }
 
 function runnerCommand(runner, cwd) {
+  if (runner.cwd !== undefined && runner.cwd !== '.') {
+    if (!safeRelativeFile(runner.cwd)) throw new Error('Runner cwd must be a relative product directory.');
+    const root = fs.realpathSync(cwd), directory = fs.realpathSync(path.join(root, runner.cwd));
+    const relative = path.relative(root, directory);
+    if (relative.startsWith('..') || path.isAbsolute(relative) || !fs.statSync(directory).isDirectory()) throw new Error('Runner cwd escapes checkout.');
+    return { ...runnerCommand({ ...runner, cwd: undefined }, directory), cwd: runner.cwd };
+  }
+  if (runner.type === 'go-test') {
+    const packages = runner.packages || ['./...'];
+    if (!Array.isArray(packages) || !packages.length || packages.length > 30 || packages.some(value => typeof value !== 'string' || !/^(?:\.|\.\/[A-Za-z0-9_./-]+)$/.test(value) || value.split('/').some(segment => segment === '..') || value.includes('...') && !value.endsWith('/...'))) throw new Error('go-test needs bounded relative package paths.');
+    return { command: 'go', args: ['test', '-json', '-count=1', ...packages] };
+  }
   if (runner.type === 'node-test') {
     if (!Array.isArray(runner.files) || !runner.files.length || !runner.files.every(safeRelativeFile)) throw new Error('node-test runner requires explicit relative test files or globs.');
     const files = [...new Set(runner.files.flatMap((pattern) => fs.globSync(pattern, { cwd })))].sort();
@@ -223,7 +303,7 @@ function runnerCommand(runner, cwd) {
   }
   if (runner.type === 'npm-script') {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9:_-]*$/.test(runner.script || '')) throw new Error('Invalid trusted npm script name.');
-    if (runner.format !== 'tap') throw new Error('npm-script currently requires format: tap.');
+    if (!['tap', 'vitest-json'].includes(runner.format)) throw new Error('npm-script requires format: tap or vitest-json.');
     const packageFile = path.join(cwd, 'package.json');
     const real = fs.realpathSync(packageFile);
     if (path.relative(fs.realpathSync(cwd), real).startsWith('..')) throw new Error('package.json escapes checkout.');
@@ -231,18 +311,27 @@ function runnerCommand(runner, cwd) {
     if (!pkg.scripts || typeof pkg.scripts[runner.script] !== 'string') throw new Error(`Missing npm script: ${runner.script}`);
     // Lifecycle scripts are not prerequisites for a QA check. The chosen script
     // still executes untrusted application code inside the isolated container.
+    if (runner.format === 'vitest-json') return { command: 'node', args: ['-e', `(${captureVitestReport.toString()})();`, JSON.stringify({ script: runner.script })] };
     return { command: 'npm', args: ['--ignore-scripts', '--silent', 'run', runner.script] };
   }
   throw new Error(`Unsupported runner type: ${runner.type}`);
 }
 
-function runProcess(command, args, { cwd, timeoutMs, maxOutput = MAX_OUTPUT, onStop }) {
+function runProcess(command, args, { cwd, timeoutMs, maxOutput = MAX_OUTPUT, onStop, terminationGraceMs = 0 }) {
+  if (!Number.isInteger(terminationGraceMs) || terminationGraceMs < 0 || terminationGraceMs > 5000) throw new Error('Invalid process termination grace period');
   return new Promise((resolve) => {
-    let output = '', timedOut = false, overflow = false, settled = false, termination;
+    let output = '', timedOut = false, overflow = false, cancelled = false, settled = false, stopping = false, termination, escalation;
     const child = spawn(command, args, { cwd, env: cleanEnvironment(), shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+    const cleanup = () => { try { onStop?.(); } catch { /* termination must still run if resource cleanup fails */ } };
+    const signal = value => { try { process.platform === 'win32' ? child.kill(value) : process.kill(-child.pid, value); } catch { /* already finished */ } };
     const stop = () => {
-      if (onStop) onStop();
-      try { process.platform === 'win32' ? child.kill('SIGKILL') : process.kill(-child.pid, 'SIGKILL'); } catch { /* already finished */ }
+      if (stopping) return;
+      stopping = true;
+      cleanup();
+      if (terminationGraceMs) {
+        signal('SIGTERM');
+        escalation = setTimeout(() => { cleanup(); signal('SIGKILL'); }, terminationGraceMs);
+      } else signal('SIGKILL');
     };
     const collect = (chunk) => {
       if (output.length + chunk.length > maxOutput) { overflow = true; output += chunk.toString().slice(0, Math.max(0, maxOutput - output.length)); stop(); }
@@ -255,11 +344,12 @@ function runProcess(command, args, { cwd, timeoutMs, maxOutput = MAX_OUTPUT, onS
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(escalation);
       process.removeListener('SIGTERM', termination);
       process.removeListener('SIGINT', termination);
-      resolve({ output, timedOut, overflow, ...extra });
+      resolve({ output, timedOut, overflow, ...(cancelled ? { cancelled: true } : {}), ...extra });
     };
-    termination = () => { stop(); finish({ cancelled: true, exitCode: null }); };
+    termination = () => { cancelled = true; stop(); };
     process.once('SIGTERM', termination);
     process.once('SIGINT', termination);
     child.once('error', (error) => finish({ error: error.message, exitCode: null }));
@@ -310,17 +400,21 @@ async function executePlan({ plan, config, cwd, metadata, outputDir, isolation, 
   let snapshot;
   try {
     if (mode === 'container' && !sourceAttestation) snapshot = snapshotCheckout(cwd);
-    return await executeVerifiedPlan({ plan, config, cwd: snapshot?.source || cwd, metadata, outputDir, mode, revision });
+    return await executeVerifiedPlan({ plan, config, cwd: snapshot?.source || cwd, productRoot: cwd, metadata, outputDir, mode, revision });
   } finally {
     if (snapshot) fs.rmSync(snapshot.root, { recursive: true, force: true });
   }
 }
 
-async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mode, revision }) {
+async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, outputDir, mode, revision }) {
   fs.mkdirSync(path.join(outputDir, 'logs'), { recursive: true });
   const image = config.execution?.image || DEFAULT_IMAGE;
   const captureScreenshots = config.execution?.captureScreenshots === true;
-  const webChecks = plan.checks.some(check => check.method === 'automated' && config.runners.some(runner => runner.id === check.runner && runner.type === 'web-preview'));
+  const scratch = config.execution?.scratchWorktree === true;
+  if (config.execution?.scratchWorktree !== undefined && typeof config.execution.scratchWorktree !== 'boolean') throw new Error('execution.scratchWorktree must be boolean');
+  const boundedResource = (name, fallback, min, max) => { const value = config.execution?.[name] ?? fallback; if (!Number.isInteger(value) || value < min || value > max) throw new Error(`Invalid execution.${name}`); return value; };
+  const scratchMb = boundedResource('scratchMb', 128, 32, 2048), memoryMb = boundedResource('memoryMb', 512, 128, 4096), cpus = boundedResource('cpus', 1, 1, 4);
+  const visualChecks = plan.checks.some(check => check.method === 'automated' && config.runners.some(runner => runner.id === check.runner && ['web-preview', 'native-app'].includes(runner.type)));
   if (config.execution?.captureScreenshots !== undefined && typeof config.execution.captureScreenshots !== 'boolean') throw new Error('execution.captureScreenshots must be boolean.');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/@-]+$/.test(image)) throw new Error('Invalid container image.');
   const envelope = {
@@ -329,7 +423,7 @@ async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mod
     runId: metadata.runId, attempt: metadata.attempt,
     ...(metadata.actionsRunId ? { actionsRunId: String(metadata.actionsRunId), actionsAttempt: Number(metadata.actionsAttempt || 1) } : {}),
     startedAt: new Date().toISOString(), execution: { isolation: mode, image: mode === 'container' ? image : null, fixture: metadata.fixture === true }, results: [],
-    ...(captureScreenshots || webChecks ? { screenshots: [], screenshotLimitations: [] } : {}),
+    ...(captureScreenshots || visualChecks ? { screenshots: [], screenshotLimitations: [] } : {}),
   };
   let screenshotBytes = 0;
   if (captureScreenshots && mode !== 'container') envelope.screenshotLimitations.push('Automatic screenshot capture requires container isolation.');
@@ -343,6 +437,26 @@ async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mod
     try {
       const runner = config.runners.find((item) => item.id === check.runner);
       if (!runner) throw new Error(`Unknown trusted runner: ${check.runner}`);
+      if (runner.type === 'native-app') {
+        const nativeDir = path.join(outputDir, 'native', crypto.createHash('sha256').update(check.id).digest('hex').slice(0, 20));
+        const evidence = await require('./native/audit').runNativeAudit({ suite: runner.suite, metadata: { ...metadata, revision, productRoot }, outputDir: nativeDir, checkId: check.id });
+        Object.assign(result, evidence.result, { execution: 'enrolled-native-device' });
+        result.evidence = (result.evidence || []).map(item => ({ ...item, path: path.relative(outputDir, path.join(nativeDir, item.path)).split(path.sep).join('/') }));
+        for (const item of evidence.screenshots || []) {
+          const source = path.join(nativeDir, item.path), bytes = fs.readFileSync(source);
+          const type = screenshotType(bytes), digest = crypto.createHash('sha256').update(bytes).digest('hex');
+          if (!type || digest !== item.sha256 || item.revision !== revision || bytes.length > MAX_SCREENSHOT_BYTES) throw new Error('Native screenshot identity or image is invalid');
+          if (envelope.screenshots.length >= MAX_SCREENSHOTS || screenshotBytes + bytes.length > MAX_SCREENSHOT_TOTAL_BYTES) { envelope.screenshotLimitations.push('Additional native screenshots exceed the shared image budget.'); continue; }
+          const relativePath = `screenshots/${digest}.${type.extension}`;
+          fs.mkdirSync(path.join(outputDir, 'screenshots'), { recursive: true });
+          fs.writeFileSync(path.join(outputDir, relativePath), bytes, { mode: 0o600 });
+          envelope.screenshots.push({ ...item, path: relativePath, checkId: check.id }); screenshotBytes += bytes.length;
+        }
+        envelope.screenshotLimitations.push(...(evidence.limitations || []));
+        fs.rmSync(path.join(nativeDir, 'screenshots'), { recursive: true, force: true });
+        envelope.execution.nativeDevice = true;
+        continue;
+      }
       if (runner.type === 'web-preview') {
         const { executeWebCheck } = require('./web/execute');
         const webDir = path.join(outputDir, 'web', crypto.createHash('sha256').update(check.id).digest('hex').slice(0, 20));
@@ -369,11 +483,13 @@ async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mod
       const timeoutMs = Math.min(10 * 60 * 1000, Math.max(20, Number(runner.timeoutMs) || 60000));
       let run;
       if (mode === 'process') {
-        run = await runProcess(command.command, command.args, { cwd, timeoutMs });
+        run = await runProcess(command.command, command.args, { cwd: path.join(cwd, command.cwd || '.'), timeoutMs });
       } else {
         const name = `qa-${crypto.randomBytes(10).toString('hex')}`;
         if (captureScreenshots) screenshotCapture = startScreenshotCapture(image);
-        const args = ['run', '--rm', '--pull=never', '--name', name, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=128', '--memory=512m', '--cpus=1', '--user=1000:1000', '--tmpfs=/tmp:rw,nosuid,nodev,size=128m', '--mount', `type=bind,src=${path.resolve(cwd)},dst=/workspace,readonly`, ...(screenshotCapture?.mount || []), '--workdir=/workspace', '--env=CI=true', '--env=NODE_ENV=test', '--env=HOME=/tmp', '--env=npm_config_cache=/tmp/npm-cache', '--env=NODE_PATH=/opt/qa/node_modules', '--env=PATH=/opt/qa/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', image, command.command, ...command.args];
+        const launch = scratch ? ['node', '-e', `(${scratchWorktree.toString()})();`, JSON.stringify(command)] : [command.command, ...command.args];
+        const temporaryOptions = `rw,nosuid,nodev,${scratch || runner.type === 'go-test' ? 'exec,' : ''}size=${scratchMb}m`;
+        const args = ['run', '--rm', '--pull=never', '--name', name, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=128', `--memory=${memoryMb}m`, `--cpus=${cpus}`, '--user=1000:1000', `--tmpfs=/tmp:${temporaryOptions}`, '--mount', `type=bind,src=${path.resolve(cwd)},dst=/workspace,readonly`, ...(screenshotCapture?.mount || []), `--workdir=/workspace${command.cwd ? `/${command.cwd}` : ''}`, '--env=CI=true', '--env=NODE_ENV=test', '--env=HOME=/tmp', '--env=npm_config_cache=/tmp/npm-cache', '--env=NODE_PATH=/opt/qa/node_modules', '--env=GOCACHE=/tmp/go-build', '--env=GOMODCACHE=/opt/qa/go/pkg/mod', '--env=GOPATH=/opt/qa/go', '--env=GOTOOLCHAIN=local', '--env=GOFLAGS=-mod=readonly', '--env=GOPROXY=off', '--env=GOSUMDB=off', '--env=PATH=/opt/qa/node_modules/.bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', image, ...launch];
         const cleanup = () => spawnSync('docker', ['rm', '-f', name], { env: cleanEnvironment(), timeout: 5000, stdio: 'ignore' });
         run = await runProcess('docker', args, { cwd, timeoutMs, onStop: cleanup });
         cleanup();
@@ -388,7 +504,7 @@ async function executeVerifiedPlan({ plan, config, cwd, metadata, outputDir, mod
       const logFile = `logs/${crypto.createHash('sha256').update(check.id).digest('hex').slice(0, 24)}.log`;
       fs.writeFileSync(path.join(outputDir, logFile), run.output);
       result.evidence.push({ type: 'log', path: logFile, excerpt: run.output.slice(-6000) });
-      const tap = parseTap(run.output);
+      const tap = runner.type === 'go-test' ? require('./test-results').parseGoJson(run.output) : runner.format === 'vitest-json' ? require('./test-results').parseVitestJson(run.output) : parseTap(run.output);
       if (run.timedOut || run.overflow || run.cancelled || run.error) {
         result.status = 'execution_error';
         result.details = run.timedOut ? `Runner exceeded ${timeoutMs} ms timeout; process tree terminated.` : run.overflow ? 'Runner exceeded the output limit.' : run.cancelled ? 'Execution canceled.' : run.error;

@@ -43,7 +43,7 @@ async function reviewLocal({ options, client, team, webRunner = executeWebCheck,
   const webSuite = options['web-suite'] ? JSON.parse(await fs.readFile(options['web-suite'], 'utf8')) : null;
   const webRunnerId = config.runners?.some(runner => runner.id === 'ui-tests') ? 'web-preview-cli' : 'ui-tests';
   if (webSuite) {
-    validateWebSuite(webSuite, { revision: pr.revision, prNumber: pr.number });
+    validateWebSuite(webSuite, { repository: pr.repository, revision: pr.revision, prNumber: pr.number });
     if (config.runners?.some(runner => runner.id === webRunnerId)) throw new Error('The dedicated browser runner ID already exists; configure its suite in trusted configuration instead.');
     config.runners = [...(config.runners || []),
       { id: webRunnerId, type: 'web-preview', baseline: true, suite: webSuite,

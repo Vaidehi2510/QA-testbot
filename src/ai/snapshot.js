@@ -55,7 +55,8 @@ async function githubSnapshot(gh, owner, repo, revision, entries, files, ai) {
   });
 }
 async function git(cwd, args, options = {}) {
-  const { stdout } = await gitExec('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: 10000, maxBuffer: 3 * 1024 * 1024, ...options });
+  const { stdout } = await gitExec('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args], { encoding: 'utf8', timeout: 10000, maxBuffer: 3 * 1024 * 1024,
+    env: { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_NO_REPLACE_OBJECTS: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' }, ...options });
   return stdout;
 }
 async function localSnapshot({ repositoryPath, base = 'main', head = 'HEAD', config, repository, number = 1, title, body = '', author = 'local-reviewer' }) {

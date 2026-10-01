@@ -81,13 +81,13 @@ jobs:
         if: steps.browser.outputs.needed == 'true'
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          node node_modules/playwright-core/cli.js install --with-deps chromium
+          node node_modules/playwright-core/cli.js install --with-deps chromium firefox webkit
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/qa-browsers
       - name: Pull trusted test environment before disabling network for PR code
         run: |
           node -e 'const fs=require("node:fs");const {spawnSync}=require("node:child_process");const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/qa-bundle/request.json"));const i=r.config.execution?.image||"node:22-bookworm-slim";if(!/^[a-zA-Z0-9][a-zA-Z0-9._:/@-]+$/.test(i))throw Error("Invalid image");const p=spawnSync("docker",["pull",i],{stdio:"inherit"});process.exit(p.status??1);'
-      - name: Run isolated checks and collect structured TAP results
+      - name: Run isolated checks and collect structured results
         run: node src/execute.js --request "$RUNNER_TEMP/qa-bundle/request.json" --checkout "$RUNNER_TEMP/qa-source" --attestation "$RUNNER_TEMP/qa-bundle/source.json" --output "$RUNNER_TEMP/qa-results"
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/qa-browsers

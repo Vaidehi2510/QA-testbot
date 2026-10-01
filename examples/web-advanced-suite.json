@@ -1,0 +1,59 @@
+{
+  "targetEnvironment": "preview",
+  "url": "https://pr-{pr}.preview.example.test",
+  "browsers": ["chromium", "firefox", "webkit"],
+  "revisionHeader": "x-qa-revision",
+  "allowMutations": false,
+  "pages": ["/"],
+  "viewports": [
+    {
+      "name": "desktop",
+      "width": 1440,
+      "height": 900
+    },
+    {
+      "name": "mobile",
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "discovery": {
+    "enabled": true,
+    "maxPages": 8,
+    "maxDepth": 2,
+    "maxLinksPerPage": 40,
+    "maxStates": 24,
+    "includePaths": ["/**"],
+    "excludePaths": ["/account/delete*", "/logout*"],
+    "exploreControls": true,
+    "maxControlsPerPage": 4
+  },
+  "visual": {
+    "baselineDir": "/absolute/path/to/QA-testbot/.qa-local/browser-baselines",
+    "pixelThreshold": 0,
+    "maxDiffRatio": 0,
+    "maxSnapshots": 24
+  },
+  "journeys": [
+    {
+      "name": "Open search",
+      "start": "/",
+      "steps": [
+        {
+          "action": "click",
+          "selector": "#search-button",
+          "fallback": {
+            "role": "button",
+            "name": "Search",
+            "tag": "button"
+          }
+        },
+        {
+          "action": "expectVisible",
+          "role": "textbox",
+          "name": "Search products"
+        }
+      ]
+    }
+  ]
+}

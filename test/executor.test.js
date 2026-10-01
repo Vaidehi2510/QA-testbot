@@ -9,6 +9,19 @@ const { dispatchExecution } = require('../src/dispatch');
 const { prepare } = require('../src/prepare-execution');
 
 const fixture = path.resolve(__dirname, '../fixtures/tiny-app');
+
+test('graceful termination escalates for an unresponsive process and repeats owned-resource cleanup', { skip: process.platform === 'win32', timeout: 10000 }, async () => {
+  let cleanups = 0;
+  const result = await runProcess(process.execPath, ['-e', "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)"], {
+    cwd: os.tmpdir(), timeoutMs: 500, terminationGraceMs: 200, onStop: () => { cleanups++; },
+  });
+  assert.match(result.output, /ready/);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.signal, 'SIGKILL');
+  assert.equal(cleanups, 2);
+  assert.throws(() => runProcess(process.execPath, [], { cwd: os.tmpdir(), timeoutMs: 100, terminationGraceMs: 99999 }), /grace period/);
+});
+
 function setup(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-executor-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
