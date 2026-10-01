@@ -171,4 +171,4 @@ async function executeWebCheck({
     await fs.rm(temporary, { recursive: true, force: true });
   }
 }
-module.exports = { executeWebCheck, stopBrowserProcesses };
+module.exports = { executeWebCheck, stopBrowserProcesses, browserCache };

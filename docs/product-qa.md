@@ -81,6 +81,8 @@ npm run demo:web
 
 Alternatively, set `QA_BROWSER_EXECUTABLE` to an explicitly trusted installed Chrome/Chromium executable. The demo automatically uses installed Google Chrome on macOS when available. It starts a temporary localhost fixture, finds deliberately introduced UI defects, verifies a corrected fixture, and removes its temporary files. It makes no model calls and does not touch product files.
 
+On Ubuntu runners that restrict user namespaces through AppArmor, downloaded Chromium binaries need an explicit permission profile to create their sandbox. The workflows generate a profile for the exact installed Chromium executable paths and install it on the ephemeral runner after downloading locked browser tooling. The browser sandbox remains enabled. Local operators can inspect `node src/web/apparmor-profile.js` before provisioning their own machine. See [Chromium's AppArmor guidance](https://github.com/chromium/chromium/blob/main/docs/security/apparmor-userns-restrictions.md).
+
 For browser-only QA, with a suite stored in the bot:
 
 ```sh

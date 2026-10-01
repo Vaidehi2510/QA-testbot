@@ -19,6 +19,13 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node node_modules/playwright-core/cli.js install --with-deps chromium firefox webkit
+      - name: Permit the installed Chromium binaries to create their sandbox
+        run: |
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            node src/web/apparmor-profile.js > "$RUNNER_TEMP/patchsentry-browsers.apparmor"
+            sudo install -m 0644 "$RUNNER_TEMP/patchsentry-browsers.apparmor" /etc/apparmor.d/patchsentry-browsers
+            sudo apparmor_parser --replace /etc/apparmor.d/patchsentry-browsers
+          fi
       - name: Unit and real browser integration tests
         run: node --test --test-concurrency=4 test/*.test.js
         env:
