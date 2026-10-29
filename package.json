@@ -1,6 +1,6 @@
 {
   "name": "qa-signoff-bot",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Automated product QA for pull requests, builds and releases, with isolated tests, browser/native evidence and local/OpenRouter model selection.",
   "license": "MIT",
   "private": true,
@@ -23,7 +23,9 @@
     "demo:web:advanced": "node src/web/demo-advanced.js",
     "qa:release": "node src/release/cli.js",
     "qa:gate": "node src/release/cli.js gate",
-    "qa:hash-artifact": "node src/release/hash-artifact.js"
+    "qa:hash-artifact": "node src/release/hash-artifact.js",
+    "qa:record": "node src/web/record.js",
+    "qa:fleet": "node src/native/fleet.js"
   },
   "dependencies": {
     "@axe-core/playwright": "4.13.0",

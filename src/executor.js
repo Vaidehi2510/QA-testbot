@@ -440,11 +440,12 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
     ...(captureScreenshots || visualChecks ? { screenshots: [], screenshotLimitations: [] } : {}),
   };
   let screenshotBytes = 0;
+  let captureTail = Promise.resolve();
   if (captureScreenshots && mode !== 'container') envelope.screenshotLimitations.push('Automatic screenshot capture requires container isolation.');
-  for (const check of plan.checks) {
+  await require("./parallel").parallelMap(plan.checks, config.execution?.maxParallel ?? 1, async check => {
     // Human decisions and unsupported coverage are evaluated from the plan by
     // the controller; only actually attempted automated checks belong here.
-    if (check.method !== 'automated') continue;
+    if (check.method !== 'automated') return;
     const started = Date.now();
     const result = { checkId: check.id, status: 'blocked', evidence: [], details: '', durationMs: 0 };
     let screenshotCapture;
@@ -454,11 +455,13 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
       if (runner.type === 'junit-report') {
         const imported = await require('./release/artifact').importedJUnit({ runner, metadata, productRoot });
         Object.assign(result, imported, { execution: 'attested-ci-junit' });
-        continue;
+        return;
       }
       if (runner.type === 'native-app') {
         const nativeDir = path.join(outputDir, 'native', crypto.createHash('sha256').update(check.id).digest('hex').slice(0, 20));
-        const evidence = await require('./native/audit').runNativeAudit({ suite: runner.suite, metadata: { ...metadata, revision, productRoot }, outputDir: nativeDir, checkId: check.id });
+        const nativeEnv = { ...process.env };
+        if ((process.env.QA_NATIVE_DEVICE_IDS || '').split(',').includes(runner.suite?.deviceId)) nativeEnv.QA_NATIVE_DEVICE_ID = runner.suite.deviceId;
+        const evidence = await require('./native/audit').runNativeAudit({ suite: runner.suite, metadata: { ...metadata, revision, productRoot }, outputDir: nativeDir, checkId: check.id, env: nativeEnv });
         Object.assign(result, evidence.result, { execution: 'enrolled-native-device' });
         result.evidence = (result.evidence || []).map(item => ({ ...item, path: path.relative(outputDir, path.join(nativeDir, item.path)).split(path.sep).join('/') }));
         for (const item of evidence.screenshots || []) {
@@ -474,7 +477,7 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
         envelope.screenshotLimitations.push(...(evidence.limitations || []));
         fs.rmSync(path.join(nativeDir, 'screenshots'), { recursive: true, force: true });
         envelope.execution.nativeDevice = true;
-        continue;
+        return;
       }
       if (runner.type === 'web-preview') {
         const { executeWebCheck } = require('./web/execute');
@@ -496,7 +499,7 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
         fs.rmSync(path.join(webDir, 'screenshots'), { recursive: true, force: true });
         fs.rmSync(path.join(webDir, 'web-result.json'), { force: true });
         envelope.execution.browserPreview = true;
-        continue;
+        return;
       }
       const command = runnerCommand(runner, cwd);
       if (runner.type === 'workspace-node-test' && mode !== 'container') throw new Error('Authored unit tests execute only inside the offline container');
@@ -515,11 +518,23 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
         run = await runProcess('docker', args, { cwd, timeoutMs, onStop: cleanup });
         cleanup();
         if (screenshotCapture) {
-          const collected = await screenshotCapture.collect(outputDir, { revision, checkId: check.id, remainingCount: MAX_SCREENSHOTS - envelope.screenshots.length, remainingBytes: MAX_SCREENSHOT_TOTAL_BYTES - screenshotBytes });
-          envelope.screenshots.push(...collected.screenshots);
-          envelope.screenshotLimitations.push(...collected.limitations);
-          screenshotBytes += collected.totalBytes;
-          if (!collected.screenshots.length && !collected.limitations.length) envelope.screenshotLimitations.push(`No screenshots were produced by check ${check.id}.`);
+          const previousCapture = captureTail; let releaseCapture;
+          captureTail = new Promise(resolve => { releaseCapture = resolve; });
+          await previousCapture;
+          try {
+            const collected = await screenshotCapture.collect(outputDir, { revision, checkId: check.id, remainingCount: MAX_SCREENSHOTS - envelope.screenshots.length, remainingBytes: MAX_SCREENSHOT_TOTAL_BYTES - screenshotBytes });
+            // Native/browser checks may finish while container collection awaits
+            // Docker. Recheck the shared budget before accepting each image.
+            for (const item of collected.screenshots) {
+              const filename = path.join(outputDir, item.path), size = fs.statSync(filename).size;
+              if (envelope.screenshots.length >= MAX_SCREENSHOTS || screenshotBytes + size > MAX_SCREENSHOT_TOTAL_BYTES) {
+                if (!envelope.screenshots.some(image => image.path === item.path)) fs.rmSync(filename, { force: true });
+                envelope.screenshotLimitations.push('Additional parallel screenshots exceed the shared image budget.');
+              } else { envelope.screenshots.push(item); screenshotBytes += size; }
+            }
+            envelope.screenshotLimitations.push(...collected.limitations);
+            if (!collected.screenshots.length && !collected.limitations.length) envelope.screenshotLimitations.push(`No screenshots were produced by check ${check.id}.`);
+          } finally { releaseCapture(); }
         }
       }
       if (runner.type === 'workspace-node-test') runnerCommand(runner, cwd);
@@ -549,7 +564,8 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
       result.durationMs = Date.now() - started;
       envelope.results.push(result);
     }
-  }
+  });
+  envelope.results.sort((a,b)=>plan.checks.findIndex(c=>c.id===a.checkId)-plan.checks.findIndex(c=>c.id===b.checkId));
   envelope.completedAt = new Date().toISOString();
   const temporary = path.join(outputDir, 'results.json.tmp');
   fs.writeFileSync(temporary, JSON.stringify(envelope, null, 2) + '\n');

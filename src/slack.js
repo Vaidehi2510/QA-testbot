@@ -29,6 +29,7 @@ function completionMessage(run) {
   const lines = [
     `*QA result* — ${link(run.pr.url, `#${run.pr.number} ${run.pr.title}`)}`,
     `Repository: ${escape(run.repository)} · revision: ${escape(run.revision)}`,
+    `PR author: ${escape(run.pr.author || 'Not recorded')} · merged by: ${escape(run.pr.mergedBy || 'Not recorded')}`,
     `Environment: ${escape(run.environment)} · run ${escape(run.runId)} / attempt ${escape(run.attempt)}`,
     outcome.status === 'awaiting_human' && outcome.automatedPassed && humanPending.length ? 'Automated checks passed; human QA review pending.' : `Outcome: ${escape(outcome.status)}`,
     `Checks: ${Object.entries(outcome.counts || {}).map(([status, count]) => `${count} ${status.replace(/_/g, ' ')}`).join(', ')}`,
@@ -82,12 +83,13 @@ class SlackAdapter {
     Object.assign(this, { webhookUrl, botToken, channelId, dryRun, fetchImpl, timeoutMs });
   }
 
-  async send(text, { key } = {}) {
+  async send(text, { key, threadTs } = {}) {
     if (this.dryRun) return { status: 'preview', text };
     if (!this.webhookUrl && !(this.botToken && this.channelId)) return { status: 'pending', reason: 'Slack is not configured' };
     const bot = Boolean(this.botToken && this.channelId);
     const url = bot ? 'https://slack.com/api/chat.postMessage' : this.webhookUrl;
     const payload = { text, unfurl_links: false, unfurl_media: false, ...(bot ? { channel: this.channelId, parse: 'none' } : {}) };
+    if (threadTs !== undefined) { if (!/^\d+\.\d+$/.test(threadTs)) throw new SlackError('Invalid Slack thread identity'); payload.thread_ts = threadTs; }
     if (bot && key) {
       const hex = crypto.createHash('sha256').update(key).digest('hex');
       payload.client_msg_id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
@@ -114,8 +116,26 @@ class SlackAdapter {
   }
 }
 
+function assessmentMessage(event, portalOrigin = 'https://patchsentry.vercel.app') {
+  const target = event.target;
+  const subject = target ? `${target.kind === 'release' ? 'Release' : 'Build'} ${brief(target.name)} · ${brief(target.platform)}` : `PR #${Number(event.pr?.number) || '?'}${event.pr?.title ? ` ${brief(event.pr.title)}` : ''}`;
+  const lines = [`*Patchsentry · QA ${brief(event.event)}*`, `*${subject}*`, `Product: ${brief(event.repository)} · revision: ${brief(event.revision)}`];
+  if(target) lines.push(`Artifact SHA-256: ${brief(target.artifactSha256)}`);
+  const people=event.people || {};
+  lines.push(`Requested by: ${brief(event.requestedBy || people.requestedBy || 'Not recorded')}`);
+  if(!target) lines.push(`PR author: ${brief(people.author || 'Unavailable')} · merged by: ${brief(people.mergedBy || 'Not merged / unavailable')}`);
+  if(target?.kind==='release') lines.push(`Released by: ${brief(people.releasedBy || 'Unavailable')}`);
+  if(target?.kind==='build') lines.push(`Built by: ${brief(people.builtBy || 'Unavailable')}`);
+  if(event.result) lines.push(`QA result: *${brief(event.result)}* · required checks: ${Number(event.checks?.passed)||0}/${Number(event.checks?.total)||0} passed · score: ${event.score === null ? 'unavailable' : `${Number(event.score)}%`}`, `Reported findings: ${Number(event.findings)||0} · model: ${brief(event.model || 'Not recorded')}`);
+  if(event.message) lines.push(brief(event.message));
+  if(/^[\w.-]+\/[\w.-]+$/.test(event.repository || '') && /^[a-f0-9]{40}$/.test(event.revision || '')) lines.push(link(`https://github.com/${event.repository}/${target ? `commit/${event.revision}` : `pull/${Number(event.pr?.number)}`}`,target ? 'Source revision' : 'Pull request'));
+  const url=new URL('/app',portalOrigin); if(/^https:$/.test(url.protocol) || url.hostname==='127.0.0.1') lines.push(link(url.href,'Open Patchsentry reports'));
+  lines.push('QA results describe configured checks; a score is not a guarantee that a product is bug-free.');
+  return lines.join('\n').slice(0,11000);
+}
+
 async function postMessage(webhookUrl, text, options = {}) {
   return new SlackAdapter({ ...options, webhookUrl }).send(text, options);
 }
 
-module.exports = { SlackAdapter, postMessage, completionMessage, requestMessage, reportAvailableMessage, planMessage, mention, escape };
+module.exports = { SlackAdapter, postMessage, completionMessage, requestMessage, reportAvailableMessage, planMessage, assessmentMessage, mention, escape };

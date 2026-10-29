@@ -69,7 +69,7 @@ function validateSession(value, requested) {
   }
   return value.sessionId;
 }
-async function runNativeAudit({ suite: input, metadata, outputDir, checkId = 'native-app-audit', env = process.env, fetchImpl } = {}) {
+async function runNativeAudit({ suite: input, metadata, outputDir, checkId = 'native-app-audit', env = process.env, fetchImpl, leaseRoot } = {}) {
   const suite = validateNativeSuite(input, metadata);
   if (!text(checkId, 160)) throw new Error('Invalid native check ID');
   const originalStat = await fs.lstat(suite.artifactPath).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
@@ -92,9 +92,10 @@ async function runNativeAudit({ suite: input, metadata, outputDir, checkId = 'na
     'Fresh native sessions relaunch the app; Mac preferences, keychains and OS data require operator-controlled disposable VM snapshots. This adapter does not isolate an arbitrary app on a normal workstation.',
   ];
   const record = (name, status, details) => observations.push({ name: redact(name).slice(0, 200), status, details: redact(String(details || '')).slice(0, 2000) });
-  let revisionVerified = false, identity, staged, staging, client, safeToRemoveStaging = true;
+  let revisionVerified = false, identity, staged, staging, client, device, safeToRemoveStaging = true;
   try {
     if (env.QA_NATIVE_ENABLED !== 'true' || env.QA_NATIVE_DEVICE_ID !== suite.deviceId) throw new NativeProtocolError('Native execution is not enabled for this explicitly enrolled disposable device/VM', { status: 'blocked' });
+    device = await require("./lease").deviceLease({deviceId:suite.deviceId,productRoot:metadata.productRoot || suite.productRoot,...(leaseRoot ? {root:leaseRoot} : {})});
     const attestation = await readJson(suite.attestationPath);
     fields(attestation, ['schemaVersion', 'repository', 'revision', 'artifactSha256', 'algorithm'], 'native builder attestation');
     if (attestation.schemaVersion !== undefined && attestation.schemaVersion !== 1 || attestation.repository !== metadata.repository || attestation.revision !== metadata.revision || !/^[a-f0-9]{64}$/.test(attestation.artifactSha256 || '')) throw new NativeProtocolError('Native builder attestation does not match the requested repository and revision', { status: 'blocked' });
@@ -151,7 +152,7 @@ async function runNativeAudit({ suite: input, metadata, outputDir, checkId = 'na
         } else if (client?.requests) { quarantine = true; safeToRemoveStaging = false; limitations.push('If session creation was interrupted before its ID arrived, discard this disposable device/VM; cleanup cannot address an unknown session.'); }
       }
       if (!acknowledged) { revisionVerified = false; quarantine = true; }
-      if (quarantine) { for (const skipped of suite.journeys.slice(journeyIndex + 1)) record(skipped.name, 'blocked', 'Further sessions are blocked until the enrolled disposable device/VM is reset.'); break; }
+      if (quarantine) { safeToRemoveStaging = false; for (const skipped of suite.journeys.slice(journeyIndex + 1)) record(skipped.name, 'blocked', 'Further sessions are blocked until the enrolled disposable device/VM is reset.'); break; }
     }
     if ((await artifactIdentity(suite.artifactPath)).artifactSha256 !== identity.artifactSha256 || (await artifactIdentity(staged.path)).artifactSha256 !== identity.artifactSha256) {
       revisionVerified = false; record('Native artifact stability', 'blocked', 'Source or staged artifact changed during native execution; observations are not accepted as revision-bound evidence.');
@@ -161,6 +162,7 @@ async function runNativeAudit({ suite: input, metadata, outputDir, checkId = 'na
     try { await fs.rm(staging, { recursive: true, force: true }); }
     catch { record('Native staging cleanup', 'blocked', 'Staged artifact cleanup failed; archive or remove it from the bot workspace.'); }
   } else if (staging) limitations.push('The staged artifact remains in the bot workspace because native session shutdown is uncertain. Reset the enrolled device/VM before removing it.');
+  if (device && safeToRemoveStaging) { try { await device.release(); } catch { record("Device lease cleanup", "blocked", "Device lease could not be released; inspect and reset the device before reuse."); } }
   let status = ['failed', 'execution_error', 'blocked'].find(value => observations.some(item => item.status === value)) || (observations.length ? 'passed' : 'blocked');
   const counts = { tests: observations.length, passed: 0, failed: 0, skipped: 0, cancelled: 0 };
   for (const observation of observations) counts[observation.status === 'passed' ? 'passed' : observation.status === 'failed' ? 'failed' : observation.status === 'execution_error' ? 'cancelled' : 'skipped']++;

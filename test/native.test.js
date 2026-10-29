@@ -54,7 +54,7 @@ async function fixture(t, options = {}) {
   const suite = { targetEnvironment: 'disposable-device', deviceId: 'emulator-5554', serverUrl: `http://127.0.0.1:${server.address().port}`, artifactPath, attestationPath,
     capabilities: { platformName: 'Android', 'appium:automationName': 'UiAutomator2', 'appium:udid': 'emulator-5554', 'appium:deviceName': 'Dedicated synthetic emulator' },
     journeys: [{ name: 'Synthetic form', steps }], captureScreenshots: true, timeoutMs: 5000, requestTimeoutMs: 1000 };
-  return { root, build, artifactPath, attestationPath, suite, requests, sessions, outputDir: path.join(root, 'bot-output') };
+  return { root, build, artifactPath, attestationPath, suite, requests, sessions, leaseRoot: path.join(root,"device-leases"), outputDir: path.join(root, 'bot-output') };
 }
 
 test('native protocol performs fixed interactions against attested staged builds with fresh sessions and cleanup, never sending integration secrets', async t => {
@@ -223,4 +223,15 @@ test('malformed native action/cleanup acknowledgements and reused or non-reset s
     if (scenario.malformedDelete) { assert.equal(f.sessions.length, 1); await fs.access(f.requests[0].body.capabilities.alwaysMatch['appium:app']); }
     if (scenario.reuseSession) { assert.equal(result.revisionVerified, false); assert.equal(result.result.counts.passed, 0); }
   }
+});
+
+test('native fleet runs independently attested device sessions and blocks devices without explicit enrollment', async t => {
+  const {runFleet}=require('../src/native/fleet');
+  const first=await fixture(t),second=await fixture(t);
+  const stamp=require('node:crypto').randomBytes(5).toString('hex');
+  const devices=[first,second].map((f,i)=>({...f.suite,deviceId:`fleet-${stamp}-${i}` ,capabilities:{...f.suite.capabilities,'appium:udid':`fleet-${stamp}-${i}`}}));
+  const productRoot=path.join(first.root,'source');await fs.mkdir(productRoot);
+  const options={fleet:{schemaVersion:1,maxParallel:2,devices},metadata:{...metadata,productRoot},outputDir:path.join(first.root,'fleet-results'),env:{...env,QA_NATIVE_DEVICE_IDS:devices.map(d=>d.deviceId).join(',')}};
+  const report=await runFleet(options);assert.equal(report.status,'passed',JSON.stringify(report));assert.equal(report.results.length,2);assert.ok(report.results.every(r=>r.revisionVerified));assert.equal(first.sessions.length,1);assert.equal(second.sessions.length,1);
+  const blocked=await runFleet({...options,outputDir:path.join(first.root,'unenrolled'),env:{...env,QA_NATIVE_DEVICE_IDS:''}});assert.equal(blocked.status,'blocked');assert.ok(blocked.results.every(r=>r.status==='blocked'));
 });

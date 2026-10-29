@@ -315,6 +315,7 @@ function validateJob(job, policy) {
       "testingProfile",
       "target",
       "unitTests",
+      "requestedBy",
     ],
     "job",
   );
@@ -336,6 +337,7 @@ function validateJob(job, policy) {
     bounded(job.pr.number, 1, 1e9, "PR number");
   }
   const units = require('../release/unit-tests').validateUnitTests(job.unitTests);
+  if (job.requestedBy !== undefined && (typeof job.requestedBy !== 'string' || job.requestedBy.length > 100)) throw new Error('Invalid job requester');
   if (units.length && (policy.allowWorkspaceTests !== true || policy.executeBaseline !== true)) throw new Error('Authored unit tests are not enrolled on this runner');
   const profile = job.testingProfile;
   fields(
