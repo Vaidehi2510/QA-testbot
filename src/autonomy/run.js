@@ -14,6 +14,7 @@ const { deriveOutcome } = require('../core');
 const { hash, validateGoals, inventoryTargets, validateRetainedJourney } = require('./schema');
 const { AutonomyStore, outsideProduct, readJson, ownedPath, writeJson } = require('./store');
 const { proposeJourneys } = require('./model');
+const { validateTarget, sameIdentity } = require('../assessment');
 const now = () => new Date().toISOString();
 const clean = value => redact(String(value || '')).slice(0, 2000);
 const sanitize = value => typeof value === 'string' ? redact(value) : Array.isArray(value) ? value.map(sanitize)
@@ -26,7 +27,7 @@ function validCounts(result) {
     && (result.status !== 'passed' || tests === passed && failed + skipped + cancelled === 0);
 }
 function verifiedEvidence(evidence, metadata, checkId, suite) {
-  if (!evidence || evidence.repository !== metadata.repository || evidence.revision !== metadata.revision || evidence.prNumber !== metadata.prNumber
+  if (!evidence || evidence.repository !== metadata.repository || evidence.revision !== metadata.revision || !sameIdentity(evidence, metadata)
     || evidence.checkId !== checkId || evidence.result?.checkId !== checkId) throw new Error('Browser evidence identity mismatch');
   if (!['passed', 'failed', 'blocked', 'execution_error', 'skipped'].includes(evidence.result.status)) throw new Error('Invalid browser evidence status');
   if (evidence.result.status === 'passed' && (evidence.revisionVerified !== true || typeof evidence.runId !== 'string' || !/^[a-f0-9-]{36}$/.test(evidence.runId) || !evidence.suiteDigest || !validCounts(evidence.result))) throw new Error('A browser pass requires positive complete counts, verified deployment identity, and a unique execution record');
@@ -39,7 +40,7 @@ function assessment(revision, ai) {
     budget: { calls: 0, reservedCostUsd: 0, reservedTokens: 0 }, limitations: [], transcript: [] };
 }
 function importedResults(envelope, metadata, checks) {
-  if (envelope.schemaVersion !== 1 || envelope.repository !== metadata.repository || envelope.revision !== metadata.revision || envelope.prNumber !== metadata.prNumber || !Array.isArray(envelope.results)) throw new Error('Imported baseline results do not match this exact repository, PR, and revision');
+  if (envelope.schemaVersion !== 1 || envelope.repository !== metadata.repository || envelope.revision !== metadata.revision || !sameIdentity(envelope, metadata) || !Array.isArray(envelope.results)) throw new Error('Imported baseline results do not match this exact repository, assessment, and revision');
   const seen = new Set();
   for (const result of envelope.results) {
     if (!checks.some(check => check.id === result?.checkId) || seen.has(result.checkId) || !['passed', 'failed', 'blocked', 'execution_error', 'skipped'].includes(result.status)
@@ -66,14 +67,18 @@ async function runAutonomous({ options = {}, client, browserRunner = executeWebC
   }
   const dryRun = options.dryRun === true || env.DRY_RUN === 'true';
   if (!config.ai.enabled && !dryRun) throw new Error('Enable AI and choose its backend/model in trusted bot configuration before autonomous execution');
-  const number = Number(options.pr || 1);
-  if (!Number.isSafeInteger(number) || number < 1 || number > 1e9) throw new Error('--pr must be a positive integer');
+  const target = options.target ? validateTarget(typeof options.target === 'string' ? JSON.parse(options.target) : options.target) : undefined;
+  if (target && options.pr !== undefined) throw new Error('Build/release QA must not supply a PR number');
+  const number = target ? undefined : Number(options.pr || 1);
+  if (!target && (!Number.isSafeInteger(number) || number < 1 || number > 1e9)) throw new Error('--pr must be a positive integer');
   if (options.repository && !/^[\w.-]+\/[\w.-]+$/.test(options.repository)) throw new Error('--repository must be owner/name');
   if (options.product && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(options.product)) throw new Error('--product must be a short local identifier');
   if (options['rerun-token'] !== undefined && (typeof options['rerun-token'] !== 'string' || options['rerun-token'].length > 200)) throw new Error('Invalid rerun token');
   const pr = await localSnapshot({ repositoryPath: productRoot, base: options.base || 'main', head: options.head || 'HEAD', config,
-    repository: options.repository, number, title: options.title });
-  const metadata = { repository: pr.repository, revision: pr.revision, prNumber: number };
+    repository: options.repository, number: target ? null : number, title: options.title });
+  if (target) { delete pr.number; pr.target = target; pr.title = `${target.kind === 'release' ? 'Release' : 'Build'} ${target.name}`; }
+  const subject = target ? { target } : { pr: { number, title: clean(pr.title) } };
+  const metadata = { repository: pr.repository, revision: pr.revision, ...(target ? { target } : { prNumber: number }) };
   const rawSuite = await readJson(suitePath);
   if (rawSuite.visual?.baselineDir) rawSuite.visual.baselineDir = await outsideProduct(rawSuite.visual.baselineDir, productRoot);
   // Only goal starts explicitly enrolled by the operator are added to discovery.
@@ -88,10 +93,10 @@ async function runAutonomous({ options = {}, client, browserRunner = executeWebC
   if (options.executeBaseline && options.results) throw new Error('Choose baseline execution or imported baseline evidence, not both');
   // Suite policy changes cannot silently reuse previously approved regressions.
   const policyKey = hash({ product: options.product || pr.repository, repository: pr.repository, suite: rawSuite });
-  const key = hash({ policyKey, revision: pr.revision, base: pr.baseRevision, pr: number, goals, configHash: hash(config), baselineChecks,
+  const key = hash({ policyKey, revision: pr.revision, base: pr.baseRevision, pr: number, ...(target ? { target } : {}), goals, configHash: hash(config), baselineChecks,
     executeBaseline: Boolean(options.executeBaseline), imported, rerunToken: options['rerun-token'] || '' });
   if (dryRun) {
-    const preview = { status: 'preview', key, repository: pr.repository, revision: pr.revision, pr: { number, title: pr.title },
+    const preview = { status: 'preview', key, repository: pr.repository, revision: pr.revision, ...subject,
       goals: goals.goals.map(goal => ({ id: goal.id, name: goal.name, assertions: goal.assertions.length })), baselineChecks,
       backend: config.ai.backend, model: config.ai.model, maxCostUsd: config.ai.maxCostUsd, outputDir: directory,
       limitations: ['Dry run only: no browser, model requests, baseline tests, saved state, or product writes.'] };
@@ -104,7 +109,7 @@ async function runAutonomous({ options = {}, client, browserRunner = executeWebC
     let run = state.runs[key];
     if (run?.phase === 'completed') { log(`Reusing completed autonomous run ${key.slice(0, 12)}.`); return run; }
     if (!run) {
-      run = { key, repository: pr.repository, revision: pr.revision, pr: { number, title: clean(pr.title) }, createdAt: now(), phase: 'running',
+      run = { key, repository: pr.repository, revision: pr.revision, ...subject, createdAt: now(), phase: 'running',
         plan: { fingerprint: key, checks: [...baselineChecks] }, results: [], decisions: [], ai: { latest: assessment(pr.revision, config.ai) },
         autonomy: { policyKey, goalsHash: hash(goals), goals: [], browser: {}, candidates: null }, limitations: [
           'Coverage is limited to explicit trusted goals, bounded discovered states, configured browsers/viewports, and executed baseline tests; this is not exhaustive product verification.',

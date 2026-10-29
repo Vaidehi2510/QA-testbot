@@ -160,7 +160,7 @@ async function executeWebCheck({
     if (
       evidence.revision !== metadata.revision ||
       evidence.repository !== metadata.repository ||
-      evidence.prNumber !== metadata.prNumber ||
+      !require('../assessment').sameIdentity(evidence, metadata) ||
       evidence.checkId !== checkId ||
       evidence.result?.checkId !== checkId
     )

@@ -13,6 +13,7 @@ async function executeBaseline({
   revision,
   repository,
   prNumber,
+  target,
   runId,
   config,
   outputDir,
@@ -162,7 +163,7 @@ async function executeBaseline({
       cwd: checkout,
       sourceAttestation: attestation,
       outputDir: output,
-      metadata: { repository, revision, prNumber, runId, attempt: 1 },
+      metadata: { repository, revision, ...(target ? { target } : { prNumber }), runId, attempt: 1 },
       isolation: "container",
     });
     return {

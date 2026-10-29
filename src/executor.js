@@ -275,6 +275,19 @@ function safeRelativeFile(filename) {
 }
 
 function runnerCommand(runner, cwd) {
+  if (runner.type === 'workspace-node-test') {
+    if (runner.cwd !== undefined || !path.isAbsolute(runner.testRoot || '') || fs.lstatSync(runner.testRoot).isSymbolicLink()) throw new Error('Workspace unit tests need a separate enrolled test directory');
+    const root = fs.realpathSync(runner.testRoot), relative = path.relative(fs.realpathSync(cwd), root);
+    if (!relative || !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)) throw new Error('Workspace unit tests must stay outside product source');
+    if (!Array.isArray(runner.files) || !runner.files.length || runner.files.length > 8 || new Set(runner.files).size !== runner.files.length) throw new Error('Workspace tests require one to eight distinct explicit files');
+    for (const filename of runner.files) {
+      if (!/^[A-Za-z0-9_-]{1,80}\.test\.cjs$/.test(filename)) throw new Error('Invalid workspace unit-test filename');
+      const handle = fs.openSync(path.join(root, filename), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      try { const stat = fs.fstatSync(handle); if (!stat.isFile() || stat.nlink !== 1 || !stat.size || stat.size > 24000) throw new Error('Unsafe workspace unit-test file'); const expected = runner.sourceDigests?.[filename]; if (!/^[a-f0-9]{64}$/.test(expected || '') || crypto.createHash('sha256').update(fs.readFileSync(handle)).digest('hex') !== expected) throw new Error('Workspace test source changed from its approved digest'); }
+      finally { fs.closeSync(handle); }
+    }
+    return { command: 'node', args: ['--test', '--test-reporter=tap', '--test-concurrency=1', '--', ...runner.files.map(file => `/qa-tests/${file}`)] };
+  }
   if (runner.cwd !== undefined && runner.cwd !== '.') {
     if (!safeRelativeFile(runner.cwd)) throw new Error('Runner cwd must be a relative product directory.');
     const root = fs.realpathSync(cwd), directory = fs.realpathSync(path.join(root, runner.cwd));
@@ -390,7 +403,8 @@ function snapshotCheckout(cwd) {
 }
 
 async function executePlan({ plan, config, cwd, metadata, outputDir, isolation, allowLocal = false, sourceAttestation }) {
-  if (!plan || !Array.isArray(plan.checks) || !metadata || !metadata.repository || !metadata.revision || !metadata.runId || !Number.isInteger(metadata.prNumber) || !Number.isInteger(metadata.attempt)) throw new Error('Execution requires a plan and complete run metadata.');
+  if (!plan || !Array.isArray(plan.checks) || !metadata || !metadata.repository || !metadata.revision || !metadata.runId || !Number.isInteger(metadata.attempt)) throw new Error('Execution requires a plan and complete run metadata.');
+  require('./assessment').identity(metadata);
   if (new Set(plan.checks.map((check) => check.id)).size !== plan.checks.length || plan.checks.some((check) => typeof check.id !== 'string' || !check.id)) throw new Error('Check IDs must be unique nonempty strings.');
   if (!Array.isArray(config.runners) || new Set(config.runners.map((runner) => runner.id)).size !== config.runners.length) throw new Error('Configured runners must have unique IDs.');
   const mode = isolation || config.execution?.isolation || 'container';
@@ -418,7 +432,7 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
   if (config.execution?.captureScreenshots !== undefined && typeof config.execution.captureScreenshots !== 'boolean') throw new Error('execution.captureScreenshots must be boolean.');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/@-]+$/.test(image)) throw new Error('Invalid container image.');
   const envelope = {
-    schemaVersion: 1, repository: metadata.repository, prNumber: metadata.prNumber, revision,
+    schemaVersion: 1, repository: metadata.repository, ...require('./assessment').identity(metadata), revision,
     environment: metadata.environment || (mode === 'container' ? image : `fixture-node-${process.versions.node}`),
     runId: metadata.runId, attempt: metadata.attempt,
     ...(metadata.actionsRunId ? { actionsRunId: String(metadata.actionsRunId), actionsAttempt: Number(metadata.actionsAttempt || 1) } : {}),
@@ -437,6 +451,11 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
     try {
       const runner = config.runners.find((item) => item.id === check.runner);
       if (!runner) throw new Error(`Unknown trusted runner: ${check.runner}`);
+      if (runner.type === 'junit-report') {
+        const imported = await require('./release/artifact').importedJUnit({ runner, metadata, productRoot });
+        Object.assign(result, imported, { execution: 'attested-ci-junit' });
+        continue;
+      }
       if (runner.type === 'native-app') {
         const nativeDir = path.join(outputDir, 'native', crypto.createHash('sha256').update(check.id).digest('hex').slice(0, 20));
         const evidence = await require('./native/audit').runNativeAudit({ suite: runner.suite, metadata: { ...metadata, revision, productRoot }, outputDir: nativeDir, checkId: check.id });
@@ -480,6 +499,7 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
         continue;
       }
       const command = runnerCommand(runner, cwd);
+      if (runner.type === 'workspace-node-test' && mode !== 'container') throw new Error('Authored unit tests execute only inside the offline container');
       const timeoutMs = Math.min(10 * 60 * 1000, Math.max(20, Number(runner.timeoutMs) || 60000));
       let run;
       if (mode === 'process') {
@@ -489,7 +509,8 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
         if (captureScreenshots) screenshotCapture = startScreenshotCapture(image);
         const launch = scratch ? ['node', '-e', `(${scratchWorktree.toString()})();`, JSON.stringify(command)] : [command.command, ...command.args];
         const temporaryOptions = `rw,nosuid,nodev,${scratch || runner.type === 'go-test' ? 'exec,' : ''}size=${scratchMb}m`;
-        const args = ['run', '--rm', '--pull=never', '--name', name, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=128', `--memory=${memoryMb}m`, `--cpus=${cpus}`, '--user=1000:1000', `--tmpfs=/tmp:${temporaryOptions}`, '--mount', `type=bind,src=${path.resolve(cwd)},dst=/workspace,readonly`, ...(screenshotCapture?.mount || []), `--workdir=/workspace${command.cwd ? `/${command.cwd}` : ''}`, '--env=CI=true', '--env=NODE_ENV=test', '--env=HOME=/tmp', '--env=npm_config_cache=/tmp/npm-cache', '--env=NODE_PATH=/opt/qa/node_modules', '--env=GOCACHE=/tmp/go-build', '--env=GOMODCACHE=/opt/qa/go/pkg/mod', '--env=GOPATH=/opt/qa/go', '--env=GOTOOLCHAIN=local', '--env=GOFLAGS=-mod=readonly', '--env=GOPROXY=off', '--env=GOSUMDB=off', '--env=PATH=/opt/qa/node_modules/.bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', image, ...launch];
+        const extraMount = runner.type === 'workspace-node-test' ? ['--mount', `type=bind,src=${fs.realpathSync(runner.testRoot)},dst=/qa-tests,readonly`] : [];
+        const args = ['run', '--rm', '--pull=never', '--name', name, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=128', `--memory=${memoryMb}m`, `--cpus=${cpus}`, '--user=1000:1000', `--tmpfs=/tmp:${temporaryOptions}`, '--mount', `type=bind,src=${path.resolve(cwd)},dst=/workspace,readonly`, ...extraMount, ...(screenshotCapture?.mount || []), `--workdir=/workspace${command.cwd ? `/${command.cwd}` : ''}`, '--env=CI=true', '--env=NODE_ENV=test', '--env=QA_PRODUCT_ROOT=/workspace', '--env=HOME=/tmp', '--env=npm_config_cache=/tmp/npm-cache', '--env=NODE_PATH=/opt/qa/node_modules', '--env=GOCACHE=/tmp/go-build', '--env=GOMODCACHE=/opt/qa/go/pkg/mod', '--env=GOPATH=/opt/qa/go', '--env=GOTOOLCHAIN=local', '--env=GOFLAGS=-mod=readonly', '--env=GOPROXY=off', '--env=GOSUMDB=off', '--env=PATH=/opt/qa/node_modules/.bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', image, ...launch];
         const cleanup = () => spawnSync('docker', ['rm', '-f', name], { env: cleanEnvironment(), timeout: 5000, stdio: 'ignore' });
         run = await runProcess('docker', args, { cwd, timeoutMs, onStop: cleanup });
         cleanup();
@@ -501,6 +522,7 @@ async function executeVerifiedPlan({ plan, config, cwd, productRoot, metadata, o
           if (!collected.screenshots.length && !collected.limitations.length) envelope.screenshotLimitations.push(`No screenshots were produced by check ${check.id}.`);
         }
       }
+      if (runner.type === 'workspace-node-test') runnerCommand(runner, cwd);
       const logFile = `logs/${crypto.createHash('sha256').update(check.id).digest('hex').slice(0, 24)}.log`;
       fs.writeFileSync(path.join(outputDir, logFile), run.output);
       result.evidence.push({ type: 'log', path: logFile, excerpt: run.output.slice(-6000) });

@@ -102,7 +102,7 @@ function createContext(pr, config = {}) {
     changedFiles.push({ path: filename, status: file.status, patch, patchTruncated: typeof file.patch === 'string' && patch.length < file.patch.length });
   }
   const inventory = {
-    revision: pr.revision, repository: pr.repository, number: pr.number,
+    revision: pr.revision, repository: pr.repository, ...(pr.target ? { target: pr.target } : { number: pr.number }),
     title: redact(pr.title).slice(0, 400), requirements: redact(pr.body).slice(0, 8000),
     changedFiles: changedFiles.slice(0, 100),
     availableFiles: [...files.values()].map(({ path: filename, kind, truncated: cut }) => ({ path: filename, kind, truncated: cut })),

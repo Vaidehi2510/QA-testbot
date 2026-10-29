@@ -1,8 +1,10 @@
-# Automated PR QA bot
+# Patchsentry — automated product QA
 
-A standalone QA bot with an optional **OpenRouter or local AI team**: browse models, assign specialists to test planning, code review, security, UI/UX, and failure triage, then run trusted test suites and report the evidence. A local dashboard manages models and shows findings, suggested fixes, candidate tests, and review costs.
+A standalone QA engine for **pull requests, CI builds and complete release versions**, with an optional **OpenRouter or local AI team**: browse models, assign specialists to test planning, code review, security, UI/UX, and failure triage, then run trusted test suites and report the evidence. A local dashboard manages models and shows findings, suggested fixes, candidate tests, and review costs.
 
 The [autonomous QA runner](docs/autonomous-qa.md) adds bounded browser discovery, generated declarative regression journeys grounded in trusted assertions, independent replay, retained tests, semantic selector maintenance, and explicit visual baselines. Chromium, Firefox, and WebKit are selectable. The [Patchsentry portal](https://patchsentry.vercel.app) can queue exact-revision work for an explicitly enrolled outbound runner. Product source stays read-only; browser/native infrastructure and business expectations must still be supplied.
+
+The [build/release runner and deployment gate](docs/releases.md) assess the complete configured release suite, bind evidence to the source commit, platform, version/build name and artifact bytes, and block stale, missing, skipped or failed checks. The portal adds an owner-scoped test library: author/version/export tests separately from product source, and explicitly enroll enabled Node tests in the offline sandbox. Attested JUnit imports connect other CI frameworks and platforms. See the [sourced product comparison and platform matrix](docs/comparison.md).
 
 The [native adapter](docs/native-qa.md) runs explicit Android, iOS, and macOS journeys through an enrolled local Appium server on a disposable device or VM. It verifies a trusted build artifact against the requested revision before accepting evidence. Physical-device and native-driver verification require your provisioned environment.
 
@@ -14,9 +16,10 @@ QA completes when every required check passes and every mandatory question is re
 
 ## Run locally
 
-Requires Node.js **22.17 or later**. The demo and tests use built-in Node modules and require no credentials, dependency installation, or network access:
+Requires Node.js **22.17 or later**. The demos need no credentials or model calls. Install the locked public dependencies before running the full test suite:
 
 ```sh
+npm ci --ignore-scripts
 npm run demo
 npm run demo:ai
 npm test
@@ -104,7 +107,7 @@ An example additional runner:
 }
 ```
 
-The default image supports dependency-free Node tests. Projects with dependencies need a reviewed image containing those dependencies at `/opt/qa/node_modules`; Go suites need their toolchain and cached modules in the image. Configure `execution.image`, preferably with an immutable digest. No install hook runs against PR code with privileged credentials. Opt-in `execution.scratchWorktree` supports framework build files and ESM resolution in a disposable container copy while preserving the read-only source mount. Service containers, JUnit, production data, and external network calls remain unsupported. Details are in [test execution](docs/execution.md) and [autonomous QA](docs/autonomous-qa.md).
+The default image supports dependency-free Node tests. Projects with dependencies need a reviewed image containing those dependencies at `/opt/qa/node_modules`; Go suites need their toolchain and cached modules in the image. Configure `execution.image`, preferably with an immutable digest. No install hook runs against PR code with privileged credentials. Opt-in `execution.scratchWorktree` supports framework build files and ESM resolution in a disposable container copy while preserving the read-only source mount. Service containers, production data, and external network calls remain unsupported. Locally attested JUnit imports and explicitly enrolled authored Node tests are described in [build/release QA](docs/releases.md). Details are in [test execution](docs/execution.md) and [autonomous QA](docs/autonomous-qa.md).
 
 Patch analysis identifies validation, authentication, authorization, error handling, and dynamic execution observations. These are heuristics, not a security audit or proof of correctness. Missing expectations, explicit `TBD`/`open question` text, and findings requiring interpretation produce targeted human checks. Default CSS changes select automated browser coverage rather than imposing routine manual visual sign-off. Contradictions can be made machine-detectable with `QA-EXPECT key: value` lines in descriptions/specs: different values for the same key create an owner question. The deterministic planner does not interpret arbitrary prose contradictions; optional AI reviewers can propose additional questions with explicit uncertainty. Test association is heuristic and gaps are included in reports. Generated source-code tests remain inert candidates. The autonomous path can execute validated declarative journeys and retain them after two verified passes, preserving operator-owned assertions. The bot never executes model-supplied commands or silently applies suggested product fixes.
 
@@ -235,3 +238,5 @@ Tests cover structured outcomes, unauthorized/stale decisions, verified routing,
 Real Chromium, Firefox, and WebKit fixtures verify browser journeys, visual regressions, discovery, selector maintenance, and redirect containment. Real Docker fixtures verify Go and Vitest results with an offline container and unchanged source files. Browser timeout fixtures also verify cleanup of detached and partially launched browser processes. The public OpenRouter catalog and local dashboard were checked live; paid inference was not exercised. Local model calls use mocked compatibility tests; no model was downloaded or benchmarked. The native adapter has protocol-level fixture coverage, but no real device or native application has been validated.
 
 Product-specific GitHub App installation, Slack delivery, Google permissions, actual model quality, preview deployment provenance, and native devices still require validation in an authorized staging setup. Passing controlled fixtures does not establish code coverage or complete QA coverage for an integrated product.
+
+Release verification additionally covers exact-artifact browser headers, complete-version CI imports without PR numbers, changed build/test inputs, deployment-gate freshness and policy checks, and offline authored tests that catch a synthetic boundary defect while preserving the source mount. These fixtures do not establish universal real-device compatibility or commercial benchmark superiority.

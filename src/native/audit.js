@@ -16,12 +16,14 @@ function bound(value, fallback, min, max, name) { const result = value ?? fallba
 function validateNativeSuite(value, metadata) {
   fields(value, ['targetEnvironment', 'serverUrl', 'deviceId', 'artifactPath', 'attestationPath', 'capabilities', 'journeys', 'timeoutMs', 'requestTimeoutMs', 'maxRequests', 'captureScreenshots', 'productRoot'], 'native suite');
   if (value.targetEnvironment !== 'disposable-device' || !id(value.deviceId)) throw new Error('Native QA requires a named enrolled disposable device or VM');
-  if (!metadata || !/^[\w.-]+\/[\w.-]+$/.test(metadata.repository || '') || !/^[a-f0-9]{40}$/.test(metadata.revision || '') || !Number.isSafeInteger(metadata.prNumber) || metadata.prNumber < 1) throw new Error('Native QA requires repository, PR and exact revision metadata');
+  if (!metadata || !/^[\w.-]+\/[\w.-]+$/.test(metadata.repository || '') || !/^[a-f0-9]{40}$/.test(metadata.revision || '')) throw new Error('Native QA requires repository and exact revision metadata');
+  require('../assessment').identity(metadata);
   for (const field of ['artifactPath', 'attestationPath']) if (typeof value[field] !== 'string' || !path.isAbsolute(value[field])) throw new Error(`Native ${field} must be an absolute local path`);
   if (value.productRoot !== undefined && (typeof value.productRoot !== 'string' || !path.isAbsolute(value.productRoot))) throw new Error('Native productRoot must be absolute');
   const capabilities = value.capabilities;
   fields(capabilities, ['platformName', 'appium:automationName', 'appium:deviceName', 'appium:udid', 'appium:bundleId', 'appium:platformVersion'], 'native capabilities');
   const driver = { Android: 'UiAutomator2', iOS: 'XCUITest', mac: 'Mac2' }[capabilities.platformName];
+  if (metadata.target && metadata.target.platform !== { Android: 'android', iOS: 'ios', mac: 'macos' }[capabilities.platformName]) throw new Error('Native suite platform differs from the requested build/release');
   if (!driver || capabilities['appium:automationName'] !== driver) throw new Error('Choose the matching Android UiAutomator2, iOS XCUITest, or Mac Mac2 driver');
   for (const [key, item] of Object.entries(capabilities)) if (!text(item, 160) || redact(item) !== item) throw new Error(`Invalid native capability ${key}`);
   if (driver === 'Mac2') {
@@ -98,6 +100,7 @@ async function runNativeAudit({ suite: input, metadata, outputDir, checkId = 'na
     if (attestation.schemaVersion !== undefined && attestation.schemaVersion !== 1 || attestation.repository !== metadata.repository || attestation.revision !== metadata.revision || !/^[a-f0-9]{64}$/.test(attestation.artifactSha256 || '')) throw new NativeProtocolError('Native builder attestation does not match the requested repository and revision', { status: 'blocked' });
     identity = await artifactIdentity(suite.artifactPath);
     if (identity.artifactSha256 !== attestation.artifactSha256 || attestation.algorithm && attestation.algorithm !== identity.algorithm) throw new NativeProtocolError('Native artifact hash does not match its trusted builder attestation', { status: 'blocked' });
+    if (metadata.target && identity.artifactSha256 !== metadata.target.artifactSha256) throw new NativeProtocolError('Native artifact differs from the build/release requested for QA', { status: 'blocked' });
     staging = await ownedPath(output, `staging/${runId}`, { directory: true });
     staged = await artifactIdentity(suite.artifactPath, { stageDir: staging });
     if (staged.artifactSha256 !== identity.artifactSha256 || (await artifactIdentity(staged.path)).artifactSha256 !== identity.artifactSha256) throw new NativeProtocolError('Native artifact changed during staging', { status: 'blocked' });
@@ -169,7 +172,7 @@ async function runNativeAudit({ suite: input, metadata, outputDir, checkId = 'na
   const filename = `native-${runId}.json`, result = { checkId, status, counts,
     details: `${counts.tests} native checks: ${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} blocked, ${counts.cancelled} execution errors.`,
     evidence: [{ type: 'native', path: filename, excerpt: observations.filter(item => item.status !== 'passed').map(item => `${item.name}: ${item.details}`).join('\n').slice(0, 6000) }] };
-  const evidence = { schemaVersion: 1, runId, repository: metadata.repository, revision: metadata.revision, prNumber: metadata.prNumber, checkId, revisionVerified, result,
+  const evidence = { schemaVersion: 1, runId, repository: metadata.repository, revision: metadata.revision, ...require('../assessment').identity(metadata), checkId, revisionVerified, result,
     artifact: identity ? { sha256: identity.artifactSha256, algorithm: identity.algorithm, bytes: identity.bytes, entries: identity.entries } : null,
     environment: 'disposable-native-device', deviceId: suite.deviceId, observations, screenshots, limitations: [...new Set(limitations)], requests: client?.requests || 0, completedAt: new Date().toISOString() };
   await writeJson(output, filename, evidence); return evidence;

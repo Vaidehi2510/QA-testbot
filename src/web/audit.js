@@ -13,6 +13,11 @@ const {
 } = require("./discovery");
 const { validateVisual, compareScreenshot } = require("./visual");
 const { validateFallback, resolveStepLocator } = require("./maintenance");
+const { identity } = require("../assessment");
+
+async function artifactMatches(response, metadata) {
+  return !metadata.target || (await response?.headerValue("x-qa-artifact-sha256"))?.trim() === metadata.target.artifactSha256;
+}
 
 const digest = (value) =>
   crypto.createHash("sha256").update(value).digest("hex");
@@ -50,10 +55,11 @@ function validateWebSuite(input, metadata) {
     !metadata ||
     typeof metadata.repository !== "string" ||
     !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(metadata.repository) ||
-    !/^[a-f0-9]{40}$/.test(metadata.revision) ||
-    !positive(metadata.prNumber, 1, 1e9)
+    !/^[a-f0-9]{40}$/.test(metadata.revision)
   )
-    throw new Error("Browser QA requires an exact commit SHA and PR number");
+    throw new Error("Browser QA requires an exact commit SHA and assessment identity");
+  identity(metadata);
+  if (metadata.target && String(input.url || "").includes("{pr}")) throw new Error("Build/release previews cannot use a PR URL placeholder");
   const rendered = String(input.url || "")
     .replaceAll("{sha}", metadata.revision)
     .replaceAll("{pr}", String(metadata.prNumber));
@@ -876,6 +882,7 @@ async function runWebAudit({
                 (await response?.headerValue(suite.revisionHeader));
               let bound =
                 servedRevision?.trim() === metadata.revision &&
+                await artifactMatches(response, metadata) &&
                 new URL(page.url()).origin === suite.origin;
               if (!bound) unverifiedRevision = true;
               record(
@@ -883,7 +890,7 @@ async function runWebAudit({
                 bound ? "passed" : "blocked",
                 bound
                   ? "The preview reports the exact requested commit."
-                  : "Preview commit could not be verified. Supply a preview/proxy revision header tied to its deployed commit; caller-provided SHA alone is insufficient.",
+                  : metadata.target ? "Build identity could not be verified. The preview must report its deployed source SHA in x-qa-revision and exact artifact digest in x-qa-artifact-sha256." : "Preview commit could not be verified. Supply a preview/proxy revision header tied to its deployed commit; caller-provided SHA alone is insufficient.",
                 destination,
               );
               if (target.navigationSteps) {
@@ -925,6 +932,7 @@ async function runWebAudit({
                 bound =
                   bound &&
                   finalRevision?.trim() === metadata.revision &&
+                  await artifactMatches(finalDocument || response, metadata) &&
                   new URL(page.url()).origin === suite.origin;
                 if (!bound) unverifiedRevision = true;
                 record(
@@ -998,6 +1006,7 @@ async function runWebAudit({
                   const stateBound =
                     bound &&
                     stateRevision?.trim() === metadata.revision &&
+                    await artifactMatches(finalDocument || response, metadata) &&
                     new URL(page.url()).origin === suite.origin;
                   if (!stateBound) unverifiedRevision = true;
                   await captureState(page, {
@@ -1024,6 +1033,7 @@ async function runWebAudit({
                 bound =
                   bound &&
                   finalRevision?.trim() === metadata.revision &&
+                  await artifactMatches(finalDocument || response, metadata) &&
                   new URL(page.url()).origin === suite.origin;
                 if (!bound) unverifiedRevision = true;
                 record(
@@ -1282,7 +1292,7 @@ async function runWebAudit({
     repairs,
     visualResults,
     repository: metadata.repository,
-    prNumber: metadata.prNumber,
+    ...identity(metadata),
     revision: metadata.revision,
     environment: "disposable-web-preview",
     revisionVerified:

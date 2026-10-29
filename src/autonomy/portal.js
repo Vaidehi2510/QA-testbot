@@ -86,6 +86,9 @@ function validatePortalPolicy(
       "timeoutMs",
       "configPath",
       "regressionDir",
+      "allowedPlatforms",
+      "releaseManifestDir",
+      "allowWorkspaceTests",
     ],
     "runner policy",
   );
@@ -109,7 +112,7 @@ function validatePortalPolicy(
     throw new Error("Enroll an explicit base Git reference");
   if (
     !Array.isArray(input.allowedPreviewOrigins) ||
-    !input.allowedPreviewOrigins.length ||
+    (!input.allowedPreviewOrigins.length && !input.allowedPlatforms?.length) ||
     input.allowedPreviewOrigins.length > 12
   )
     throw new Error("Enroll preview origins");
@@ -121,7 +124,7 @@ function validatePortalPolicy(
     new Set(values).size === values.length &&
     values.every((value) => allowed.includes(value));
   if (
-    !distinct(input.allowedBrowsers, ["chromium", "firefox", "webkit"]) ||
+    !(distinct(input.allowedBrowsers, ["chromium", "firefox", "webkit"]) || Array.isArray(input.allowedBrowsers) && input.allowedBrowsers.length === 0 && input.allowedPlatforms?.length && !input.allowedPlatforms.includes('web')) ||
     !distinct(input.allowedBackends, ["local", "openrouter"])
   )
     throw new Error("Enroll allowed browsers and model backends");
@@ -152,6 +155,9 @@ function validatePortalPolicy(
     ? require("../web/visual").validateVisual(input.visual)
     : null;
   const parent = path.dirname(path.resolve(policyPath));
+  if (input.allowedPlatforms !== undefined && (!Array.isArray(input.allowedPlatforms) || input.allowedPlatforms.length > 7 || new Set(input.allowedPlatforms).size !== input.allowedPlatforms.length || input.allowedPlatforms.some(p => !require('../assessment').platforms.includes(p)))) throw new Error('Invalid enrolled build/release platforms');
+  if (input.allowedPlatforms?.length && (!input.releaseManifestDir || typeof input.releaseManifestDir !== 'string' || input.executeBaseline !== true)) throw new Error('Build/release QA requires an enrolled manifest directory and explicit baseline execution');
+  if (input.allowWorkspaceTests !== undefined && typeof input.allowWorkspaceTests !== 'boolean') throw new Error('Invalid authored-test execution enrollment');
   const configPath = path.resolve(
     parent,
     input.configPath || path.join(botDir, "qa-config.json"),
@@ -162,6 +168,7 @@ function validatePortalPolicy(
   );
   return {
     ...input,
+    ...(input.releaseManifestDir ? { releaseManifestDir: path.resolve(parent, input.releaseManifestDir) } : {}),
     ...(visual ? { visual } : {}),
     repoCheckout: path.resolve(input.repoCheckout),
     configPath,
@@ -203,6 +210,7 @@ async function protectedPaths(policy, outputs = []) {
   for (const target of [
     policy.configPath,
     policy.regressionDir,
+    ...(policy.releaseManifestDir ? [policy.releaseManifestDir] : []),
     ...(policy.visual ? [policy.visual.baselineDir] : []),
     ...outputs,
   ]) {
@@ -305,6 +313,8 @@ function validateJob(job, policy) {
       "base",
       "settings",
       "testingProfile",
+      "target",
+      "unitTests",
     ],
     "job",
   );
@@ -318,8 +328,15 @@ function validateJob(job, policy) {
     throw new Error(
       "Job does not match the enrolled repository, base and exact revision",
     );
-  fields(job.pr, ["number", "title"], "PR");
-  bounded(job.pr.number, 1, 1e9, "PR number");
+  if (job.target !== undefined) {
+    const subject = require('../assessment').validateTarget(job.target);
+    if (job.pr !== undefined || !policy.allowedPlatforms?.includes(subject.platform) || !policy.releaseManifestDir || policy.executeBaseline !== true) throw new Error('This build/release platform is not locally enrolled');
+  } else {
+    fields(job.pr, ["number", "title"], "PR");
+    bounded(job.pr.number, 1, 1e9, "PR number");
+  }
+  const units = require('../release/unit-tests').validateUnitTests(job.unitTests);
+  if (units.length && (policy.allowWorkspaceTests !== true || policy.executeBaseline !== true)) throw new Error('Authored unit tests are not enrolled on this runner');
   const profile = job.testingProfile;
   fields(
     profile,
@@ -343,9 +360,11 @@ function validateJob(job, policy) {
     profile.previewUrlTemplate.length > 1000
   )
     throw new Error("Invalid preview URL");
+  if (!job.target || job.target.platform === "web") {
+    if (job.target && profile.previewUrlTemplate.includes("{pr}")) throw new Error("Build/release URLs cannot use a PR placeholder");
   const target = new URL(
     profile.previewUrlTemplate
-      .replaceAll("{pr}", String(job.pr.number))
+      .replaceAll("{pr}", String(job.pr?.number))
       .replaceAll("{sha}", job.revision),
   );
   if (
@@ -354,7 +373,7 @@ function validateJob(job, policy) {
     target.hash ||
     /[{}]/.test(target.href) ||
     !policy.allowedPreviewOrigins
-      .map((value) => origin(value, job.pr.number))
+      .map((value) => origin(value, job.pr?.number))
       .includes(target.origin)
   )
     throw new Error("Job preview origin is not locally enrolled");
@@ -424,6 +443,7 @@ function validateJob(job, policy) {
     policy.allowSemanticMaintenance !== true
   )
     throw new Error("Persisting semantic repairs is not locally enrolled");
+  }
   fields(
     job.settings,
     [
@@ -463,7 +483,7 @@ function portalReport(run, job) {
   if (
     run.repository !== job.repository ||
     run.revision !== job.revision ||
-    Number(run.pr?.number || run.prNumber) !== job.pr.number
+    !require('../assessment').sameIdentity({ target: run.target, prNumber: run.pr?.number || run.prNumber }, { target: job.target, prNumber: job.pr?.number })
   )
     throw new Error("Engine report identity mismatch");
   const clean = (value, limit) => redact(String(value || "")).slice(0, limit);
@@ -496,7 +516,7 @@ function portalReport(run, job) {
         ? check.method
         : "unsupported";
     let status =
-      result?.status ||
+      (method === "analysis" ? (check.revision === job.revision && ["passed", "execution_error"].includes(check.analysisStatus) ? check.analysisStatus : "blocked") : result?.status) ||
       check.status ||
       (method === "human" ? "awaiting_human" : "blocked");
     if (!validStatuses.has(status)) status = "blocked";
@@ -538,7 +558,7 @@ function portalReport(run, job) {
       details:
         "Additional required checks exceed this report; review full evidence on the runner.",
     };
-  for (const goal of job.testingProfile.goals.goals) {
+  for (const goal of (!job.target || job.target.platform === 'web' ? job.testingProfile.goals.goals : [])) {
     for (const id of [`goal-${goal.id}`, `replay-${goal.id}`]) {
       if (!checks.some((check) => check.id === id))
         checks.push({
@@ -555,6 +575,11 @@ function portalReport(run, job) {
         });
     }
   }
+  const requiredIds = [
+    ...(job.target ? ['release-artifact', 'release-platform', 'release-artifact-stability', 'release-input-stability'] : []),
+    ...(job.unitTests?.length ? ['runner-patchsentry-authored-unit-tests'] : []),
+  ];
+  for (const id of requiredIds) if (!checks.some(c => c.id === id && c.method === 'automated' && c.required)) checks.push({ id: `${id}-missing`, name: `Required ${id} evidence`, method: 'automated', required: true, status: 'blocked', details: 'The engine omitted required assessment coverage; this report cannot approve a release.' });
   if (new Set(checks.map((check) => check.id)).size !== checks.length)
     throw new Error("Report check IDs collide after redaction");
   if (checks.length > 200)
@@ -587,13 +612,13 @@ function portalReport(run, job) {
     schemaVersion: 1,
     recordId: sha(`portal:${job.id}:${job.repository}:${job.revision}`),
     repository: job.repository,
-    pr: {
+    ...(job.target ? { target: require('../assessment').validateTarget(job.target) } : { pr: {
       number: job.pr.number,
       title: clean(
         run.pr?.title || job.pr.title || `PR #${job.pr.number}`,
         300,
       ),
-    },
+    } }),
     revision: job.revision,
     createdAt: run.createdAt || new Date().toISOString(),
     completedAt: run.completedAt || new Date().toISOString(),
@@ -646,7 +671,7 @@ async function runPortal({
     "--end-of-options",
     `${policy.base}^{commit}`,
   ]);
-  const config = await readJson(policy.configPath);
+  let config = await readJson(policy.configPath);
   if (config.ai?.enabled !== true)
     throw new Error(
       "AI execution must be enabled locally before website jobs can run",
@@ -679,6 +704,8 @@ async function runPortal({
     policyHash: sha(JSON.stringify(policy)),
     configHash: sha(JSON.stringify(config)),
     baseRevision,
+    ...(job.target ? { baselineInputHash: await require("../release/artifact").externalInputFingerprint(config, policy.repoCheckout) } : {}),
+    ...(job.target ? { releaseManifestHash: sha(JSON.stringify(await readJson(path.join(policy.releaseManifestDir, `${job.target.artifactSha256}.json`)))) } : {}),
   };
   const receiptPath = await ownedPath(
     await canonical(policy.regressionDir),
@@ -703,6 +730,7 @@ async function runPortal({
     suite: path.join(inputDirectory, "suite.json"),
     goals: path.join(inputDirectory, "goals.json"),
   };
+  config = await require("../release/unit-tests").stageUnitTests({ tests: job.unitTests, policy, config, directory: output, repo: policy.repoCheckout });
   const suite = {
     targetEnvironment: "preview",
     url: job.testingProfile.previewUrlTemplate,
@@ -723,14 +751,14 @@ async function runPortal({
   await fs.writeFile(files.goals, JSON.stringify(job.testingProfile.goals), {
     mode: 0o600,
   });
-  const execute = runAutonomous || require("./run").runAutonomous;
+  const execute = runAutonomous || (job.target ? require("../release/run").runRelease : require("./run").runAutonomous);
   const run = await execute({
     options: {
       repo: policy.repoCheckout,
       base: baseRevision,
       head: job.revision,
       repository: job.repository,
-      pr: String(job.pr.number),
+      ...(job.target ? { target: job.target, manifest: path.join(policy.releaseManifestDir, `${job.target.artifactSha256}.json`) } : { pr: String(job.pr.number) }),
       product: sha(job.repository).slice(0, 24),
       suite: files.suite,
       goals: files.goals,
