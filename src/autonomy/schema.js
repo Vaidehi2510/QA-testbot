@@ -31,15 +31,16 @@ function validateGoals(value) {
     if (!Array.isArray(goal.assertions) || !goal.assertions.length || goal.assertions.length > 8) throw new Error('Every goal needs explicit trusted assertions; observed UI is not an oracle');
     const assertionIds = new Set();
     for (const assertion of goal.assertions) {
-      keys(assertion, ['id', 'action', 'selector', 'role', 'name', 'text', 'path', 'exact'], 'assertion');
-      if (!id(assertion.id) || assertionIds.has(assertion.id) || !['expectText', 'expectVisible', 'expectUrl'].includes(assertion.action)) throw new Error('Invalid trusted assertion');
+      keys(assertion, ['id', 'action', 'selector', 'role', 'name', 'text', 'path', 'exact', 'count'], 'assertion');
+      if (!id(assertion.id) || assertionIds.has(assertion.id) || !['expectText', 'expectVisible', 'expectUrl','expectHidden','expectCount'].includes(assertion.action)) throw new Error('Invalid trusted assertion');
       assertionIds.add(assertion.id);
+      if(assertion.action==='expectCount'&&(!Number.isInteger(assertion.count)||assertion.count<0||assertion.count>10000)||assertion.action!=='expectCount'&&assertion.count!==undefined)throw new Error('Invalid trusted count assertion');
       if (assertion.exact !== undefined && (assertion.action !== 'expectText' || typeof assertion.exact !== 'boolean')) throw new Error('Only text assertions accept an explicit exact-match policy');
       if (assertion.action === 'expectUrl') {
         if (!localPath(assertion.path) || ['selector', 'role', 'name', 'text'].some(key => assertion[key] !== undefined)) throw new Error('URL assertions need only an explicit same-origin path');
       } else {
         locator(assertion);
-        if (assertion.path !== undefined || assertion.action === 'expectText' && !text(assertion.text) || assertion.action === 'expectVisible' && assertion.text !== undefined) throw new Error('Invalid expected assertion text');
+        if (assertion.path !== undefined || assertion.action === 'expectText' && !text(assertion.text) || ['expectVisible','expectHidden','expectCount'].includes(assertion.action) && assertion.text !== undefined) throw new Error('Invalid expected assertion text');
       }
     }
     return structuredClone({ ...goal, inputs, assertions: goal.assertions.map(assertion => assertion.action === 'expectText' ? { ...assertion, exact: assertion.exact ?? true } : assertion) });
@@ -106,7 +107,7 @@ function compileCandidates(value, goals, targets) {
         return structuredClone(trusted);
       }
       if (asserted.size) throw new Error('Generated interactions must finish before the trusted final-state assertions');
-      if (!['click', 'fill', 'press'].includes(step.action) || step.assertionId !== undefined) throw new Error('Generated code and arbitrary browser actions are forbidden');
+      if (!['click', 'dblclick','hover', 'fill', 'press'].includes(step.action) || step.assertionId !== undefined) throw new Error('Generated code and arbitrary browser actions are forbidden');
       const target = targets.get(step.targetId);
       if (!target) throw new Error('Candidate refers to an element outside verified discovery');
       const compiled = { action: step.action };
@@ -138,7 +139,7 @@ function validateRetainedJourney(goal, journey) {
       if (!expected.includes(signature)) throw new Error('Retained journey changed a trusted assertion');
       actual.push(signature); asserting = true;
     } else {
-      if (asserting || !['click', 'fill', 'press'].includes(step?.action)) throw new Error('Retained journey changed the allowed action/assertion order');
+      if (asserting || !['click', 'dblclick','hover', 'fill', 'press'].includes(step?.action)) throw new Error('Retained journey changed the allowed action/assertion order');
       if (step.action === 'fill' && !Object.values(goal.inputs).includes(step.value)) throw new Error('Retained journey changed an approved synthetic input');
       if (step.action === 'press' && !['Enter', 'Tab', 'Escape', 'ArrowDown', 'ArrowUp', 'Space'].includes(step.value)) throw new Error('Retained journey changed an approved key press');
     }

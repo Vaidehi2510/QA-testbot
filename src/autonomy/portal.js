@@ -302,6 +302,7 @@ async function preflightPortal({
   };
 }
 function validateJob(job, policy) {
+  require("./quality-plan").validateQualityPlan(job?.qualityPlan);
   fields(
     job,
     [
@@ -316,6 +317,7 @@ function validateJob(job, policy) {
       "target",
       "unitTests",
       "requestedBy",
+      "qualityPlan",
     ],
     "job",
   );
@@ -582,6 +584,7 @@ function portalReport(run, job) {
     ...(job.unitTests?.length ? ['runner-patchsentry-authored-unit-tests'] : []),
   ];
   for (const id of requiredIds) if (!checks.some(c => c.id === id && c.method === 'automated' && c.required)) checks.push({ id: `${id}-missing`, name: `Required ${id} evidence`, method: 'automated', required: true, status: 'blocked', details: 'The engine omitted required assessment coverage; this report cannot approve a release.' });
+  checks.push(...require("./quality-plan").requirementChecks(job.qualityPlan,checks));
   if (new Set(checks.map((check) => check.id)).size !== checks.length)
     throw new Error("Report check IDs collide after redaction");
   if (checks.length > 200)
@@ -612,6 +615,7 @@ function portalReport(run, job) {
   }));
   return {
     schemaVersion: 1,
+    ...(job.qualityPlan?{qualityPlanDigest:job.qualityPlan.digest}:{}),
     recordId: sha(`portal:${job.id}:${job.repository}:${job.revision}`),
     repository: job.repository,
     ...(job.target ? { target: require('../assessment').validateTarget(job.target) } : { pr: {
@@ -774,6 +778,7 @@ async function runPortal({
     log: () => {},
   });
   const report = portalReport(run, job);
+  await require("./portal-evidence").exportPortalEvidence({run,report,output,regressionDir:policy.regressionDir});
   const target = path.join(output, "portal-run.json");
   await fs.writeFile(target, JSON.stringify(report, null, 2), {
     flag: "wx",
@@ -816,6 +821,7 @@ if (require.main === module)
     process.exitCode = 1;
   });
 module.exports = {
+  validateQualityPlan: require("./quality-plan").validateQualityPlan,
   validatePortalPolicy,
   validateJob,
   preflightPortal,

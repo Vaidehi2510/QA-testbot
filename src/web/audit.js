@@ -157,9 +157,14 @@ function validateWebSuite(input, metadata) {
         !step ||
         ![
           "click",
+          "dblclick",
+          "hover",
+          "reload",
           "fill",
           "press",
           "expectVisible",
+          "expectHidden",
+          "expectCount",
           "expectText",
           "expectUrl",
         ].includes(step.action)
@@ -177,7 +182,7 @@ function validateWebSuite(input, metadata) {
         );
       if (step.action.startsWith("expect")) assertions++;
       if (
-        step.action !== "expectUrl" &&
+        !(["expectUrl","reload"].includes(step.action)) &&
         !(
           (typeof step.selector === "string" &&
             step.selector.length <= 300 &&
@@ -196,6 +201,7 @@ function validateWebSuite(input, metadata) {
         (typeof step.value !== "string" || step.value.length > 1000)
       )
         throw new Error("Browser input must be a bounded synthetic value");
+      if(step.action === "expectCount" && (!Number.isInteger(step.count)||step.count<0||step.count>10000))throw new Error("Count assertions require a bounded nonnegative integer");
       if (
         step.action === "expectText" &&
         (typeof step.text !== "string" || !step.text || step.text.length > 1000)
@@ -955,7 +961,7 @@ async function runWebAudit({
                 journeyStarted = true;
                 for (const [stepIndex, step] of target.steps.entries()) {
                   const locator =
-                    step.action === "expectUrl"
+                    ["expectUrl","reload"].includes(step.action)
                       ? null
                       : await resolveStepLocator(page, step, {
                           repairs,
@@ -967,12 +973,17 @@ async function runWebAudit({
                         });
                   if (step.action === "click")
                     await interact(page, () => locator.click());
+                  else if(step.action === "hover")await locator.hover();
+                  else if(step.action === "dblclick")await interact(page,()=>locator.dblclick());
+                  else if(step.action === "reload")await interact(page,()=>page.reload());
                   else if (step.action === "fill")
                     await interact(page, () => locator.fill(step.value));
                   else if (step.action === "press")
                     await interact(page, () => locator.press(step.value));
                   else if (step.action === "expectVisible")
                     await locator.waitFor({ state: "visible" });
+                  else if(step.action === "expectHidden")await locator.waitFor({state:"hidden"});
+                  else if(step.action === "expectCount"){const deadline=Date.now()+suite.timeoutMs;let matched=false;do{if(await locator.count()===step.count){matched=true;break;}await new Promise(r=>setTimeout(r,50));}while(Date.now()<deadline);if(!matched)throw new Error("Expected element count did not match");}
                   else if (step.action === "expectText") {
                     if (step.exact) {
                       const deadline = Date.now() + suite.timeoutMs;
@@ -1194,6 +1205,7 @@ async function runWebAudit({
                 }
               }
             } catch (error) {
+              if(journeyStarted&&page)try{if(page.isClosed?.())throw new Error("Page closed");const doc=finalDocument;if((await doc?.headerValue(suite.revisionHeader))?.trim()===metadata.revision&&await artifactMatches(doc,metadata)&&new URL(page.url()).origin===suite.origin)await screenshot(page,label+' failure',{browser:engine,viewport:viewport.name,width:viewport.width,height:viewport.height,pagePath:target.start,journey:target.name||null,failure:true});}catch{limitations.push(`${label}: failure screenshot unavailable; inspect the execution observation.`);}
               record(
                 `${label} ${journeyStarted ? "journey" : "execution"}`,
                 journeyStarted ? "failed" : "execution_error",
