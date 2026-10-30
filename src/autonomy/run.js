@@ -76,6 +76,7 @@ async function runAutonomous({ options = {}, client, browserRunner = executeWebC
   if (options['rerun-token'] !== undefined && (typeof options['rerun-token'] !== 'string' || options['rerun-token'].length > 200)) throw new Error('Invalid rerun token');
   const pr = await localSnapshot({ repositoryPath: productRoot, base: options.base || 'main', head: options.head || 'HEAD', config,
     repository: options.repository, number: target ? null : number, title: options.title });
+  require('./quality-plan').applyQualityContext(pr,options.qualityPlan);
   if (target) { delete pr.number; pr.target = target; pr.title = `${target.kind === 'release' ? 'Release' : 'Build'} ${target.name}`; }
   const subject = target ? { target } : { pr: { number, title: clean(pr.title) } };
   const metadata = { repository: pr.repository, revision: pr.revision, ...(target ? { target } : { prNumber: number }) };
@@ -93,7 +94,7 @@ async function runAutonomous({ options = {}, client, browserRunner = executeWebC
   if (options.executeBaseline && options.results) throw new Error('Choose baseline execution or imported baseline evidence, not both');
   // Suite policy changes cannot silently reuse previously approved regressions.
   const policyKey = hash({ product: options.product || pr.repository, repository: pr.repository, suite: rawSuite });
-  const key = hash({ policyKey, revision: pr.revision, base: pr.baseRevision, pr: number, ...(target ? { target } : {}), goals, configHash: hash(config), baselineChecks,
+  const key = hash({ qualityPlanDigest:pr.qualityPlanDigest||null, policyKey, revision: pr.revision, base: pr.baseRevision, pr: number, ...(target ? { target } : {}), goals, configHash: hash(config), baselineChecks,
     executeBaseline: Boolean(options.executeBaseline), imported, rerunToken: options['rerun-token'] || '' });
   if (dryRun) {
     const preview = { status: 'preview', key, repository: pr.repository, revision: pr.revision, ...subject,

@@ -707,6 +707,7 @@ async function runPortal({
     schemaVersion: 1,
     jobId: job.id,
     jobHash: sha(JSON.stringify(job)),
+    engineFingerprint: sha(JSON.stringify(await Promise.all(['portal.js','run.js','model.js','schema.js','quality-plan.js','../web/audit.js','../web/api-assertion.js','../release/run.js','../ai/team.js','../ai/client.js','../ai/context.js'].map(async filename=>[filename,sha(await fs.readFile(path.join(__dirname,filename)))])))),
     policyHash: sha(JSON.stringify(policy)),
     configHash: sha(JSON.stringify(config)),
     baseRevision,
@@ -760,6 +761,7 @@ async function runPortal({
   const execute = runAutonomous || (job.target ? require("../release/run").runRelease : require("./run").runAutonomous);
   const run = await execute({
     options: {
+      ...(job.qualityPlan?{qualityPlan:job.qualityPlan}:{}),
       repo: policy.repoCheckout,
       base: baseRevision,
       head: job.revision,
@@ -821,6 +823,7 @@ if (require.main === module)
     process.exitCode = 1;
   });
 module.exports = {
+  validateApiAssertion:require("../web/api-assertion").validateApiAssertion,
   validateQualityPlan: require("./quality-plan").validateQualityPlan,
   validatePortalPolicy,
   validateJob,

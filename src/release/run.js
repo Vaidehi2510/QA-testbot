@@ -43,6 +43,7 @@ async function runRelease({ options = {}, env = process.env, baselineRunner, aut
   const config = await readJson(configPath); config.ai = validateAIConfig(config.ai || {});
   if (options['budget-usd'] !== undefined) { const value = Number(options['budget-usd']); if (!Number.isFinite(value) || value < 0 || value > config.ai.maxCostUsd) throw new Error('A release budget can only reduce the locally enrolled budget'); config.ai.maxCostUsd = value; }
   const snapshot = await localSnapshot({ repositoryPath: repo, base: options.base || 'main', head: options.head || 'HEAD', repository: options.repository, number: null, title: `${target.kind} ${target.name}`, config });
+  require('../autonomy/quality-plan').applyQualityContext(snapshot,options.qualityPlan);
   delete snapshot.number; snapshot.target = target;
   const metadata = { repository: snapshot.repository, revision: snapshot.revision, target };
   const runners = (config.runners || []).filter(r => r.baseline);
@@ -53,7 +54,7 @@ async function runRelease({ options = {}, env = process.env, baselineRunner, aut
   let inputHash;
   try { inputHash = await externalInputFingerprint(config, repo); } catch (error) { inputHash = `unavailable:${clean(error.message)}`; }
   const suiteInput = options.suite ? await readJson(await outsideProduct(options.suite, repo)) : null, goalsInput = options.goals ? await readJson(await outsideProduct(options.goals, repo)) : null;
-  const key = hash({ metadata, base: snapshot.baseRevision, config, inputHash, manifestHash: artifact?.manifestHash || artifactError, suite: suiteInput, goals: goalsInput, rerunToken: options['rerun-token'] || '' });
+  const key = hash({qualityPlanDigest:snapshot.qualityPlanDigest||null, metadata, base: snapshot.baseRevision, config, inputHash, manifestHash: artifact?.manifestHash || artifactError, suite: suiteInput, goals: goalsInput, rerunToken: options['rerun-token'] || '' });
   if (options.dryRun || env.DRY_RUN === 'true') return { key, status: 'preview', ...metadata, artifactVerified: Boolean(artifact), artifactError, baselineChecks: expected, limitations: ['No tests, model calls, device sessions or product writes were performed.'] };
   await fs.mkdir(output, { recursive: true, mode: 0o700 });
   const store = new AutonomyStore(output);

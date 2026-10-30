@@ -165,6 +165,8 @@ function validateWebSuite(input, metadata) {
           "expectVisible",
           "expectHidden",
           "expectCount",
+          "expectFocused",
+          "expectApi",
           "expectText",
           "expectUrl",
         ].includes(step.action)
@@ -173,6 +175,7 @@ function validateWebSuite(input, metadata) {
           "Unsupported browser step; arbitrary JavaScript is not allowed",
         );
       validateFallback(step);
+      if(step.action==='expectApi'){require('./api-assertion').validateApiAssertion(step);assertions++;continue;}
       if (
         step.exact !== undefined &&
         (step.action !== "expectText" || typeof step.exact !== "boolean")
@@ -373,6 +376,7 @@ async function runWebAudit({
   browsers,
   axeFactory,
   proxyFactory = createPreviewProxy,
+  apiFetch = fetch,
   env = process.env,
   onBrowserProcess = async () => {},
 }) {
@@ -961,7 +965,7 @@ async function runWebAudit({
                 journeyStarted = true;
                 for (const [stepIndex, step] of target.steps.entries()) {
                   const locator =
-                    ["expectUrl","reload"].includes(step.action)
+                    ["expectUrl","reload","expectApi"].includes(step.action)
                       ? null
                       : await resolveStepLocator(page, step, {
                           repairs,
@@ -971,7 +975,9 @@ async function runWebAudit({
                           browser: engine,
                           viewport: viewport.name,
                         });
-                  if (step.action === "click")
+                  if(step.action==='expectApi')await require('./api-assertion').assertApiResponse({step,suite,metadata,context,fetchImpl:apiFetch});
+                  else if(step.action==='expectFocused'){if(!await locator.evaluate(el=>el===document.activeElement))throw new Error('The approved keyboard focus target was not focused');}
+                  else if (step.action === "click")
                     await interact(page, () => locator.click());
                   else if(step.action === "hover")await locator.hover();
                   else if(step.action === "dblclick")await interact(page,()=>locator.dblclick());

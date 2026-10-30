@@ -31,16 +31,18 @@ function validateGoals(value) {
     if (!Array.isArray(goal.assertions) || !goal.assertions.length || goal.assertions.length > 8) throw new Error('Every goal needs explicit trusted assertions; observed UI is not an oracle');
     const assertionIds = new Set();
     for (const assertion of goal.assertions) {
-      keys(assertion, ['id', 'action', 'selector', 'role', 'name', 'text', 'path', 'exact', 'count'], 'assertion');
-      if (!id(assertion.id) || assertionIds.has(assertion.id) || !['expectText', 'expectVisible', 'expectUrl','expectHidden','expectCount'].includes(assertion.action)) throw new Error('Invalid trusted assertion');
+      keys(assertion, ['id', 'action', 'selector', 'role', 'name', 'text', 'path', 'exact', 'count', 'status','jsonPointer','expectedValue'], 'assertion');
+      if (!id(assertion.id) || assertionIds.has(assertion.id) || !['expectText', 'expectVisible', 'expectUrl','expectHidden','expectCount','expectFocused','expectApi'].includes(assertion.action)) throw new Error('Invalid trusted assertion');
       assertionIds.add(assertion.id);
       if(assertion.action==='expectCount'&&(!Number.isInteger(assertion.count)||assertion.count<0||assertion.count>10000)||assertion.action!=='expectCount'&&assertion.count!==undefined)throw new Error('Invalid trusted count assertion');
       if (assertion.exact !== undefined && (assertion.action !== 'expectText' || typeof assertion.exact !== 'boolean')) throw new Error('Only text assertions accept an explicit exact-match policy');
+      if(assertion.action==='expectApi'){require('../web/api-assertion').validateApiAssertion(assertion);continue;}
+      if(['status','jsonPointer','expectedValue'].some(k=>assertion[k]!==undefined))throw new Error('Only API assertions accept response expectations');
       if (assertion.action === 'expectUrl') {
         if (!localPath(assertion.path) || ['selector', 'role', 'name', 'text'].some(key => assertion[key] !== undefined)) throw new Error('URL assertions need only an explicit same-origin path');
       } else {
         locator(assertion);
-        if (assertion.path !== undefined || assertion.action === 'expectText' && !text(assertion.text) || ['expectVisible','expectHidden','expectCount'].includes(assertion.action) && assertion.text !== undefined) throw new Error('Invalid expected assertion text');
+        if (assertion.path !== undefined || assertion.action === 'expectText' && !text(assertion.text) || ['expectVisible','expectHidden','expectCount','expectFocused','expectApi'].includes(assertion.action) && assertion.text !== undefined) throw new Error('Invalid expected assertion text');
       }
     }
     return structuredClone({ ...goal, inputs, assertions: goal.assertions.map(assertion => assertion.action === 'expectText' ? { ...assertion, exact: assertion.exact ?? true } : assertion) });
@@ -119,7 +121,7 @@ function compileCandidates(value, goals, targets) {
         if (!Object.hasOwn(goal.inputs, step.inputId) || step.key !== undefined) throw new Error('Generated input must reference an approved synthetic value');
         compiled.value = goal.inputs[step.inputId];
       } else if (step.action === 'press') {
-        if (!['Enter', 'Tab', 'Escape', 'ArrowDown', 'ArrowUp', 'Space'].includes(step.key) || step.inputId !== undefined) throw new Error('Unapproved generated key press');
+        if (!['Enter', 'Tab', 'Shift+Tab', 'Escape', 'ArrowDown', 'ArrowUp','ArrowLeft','ArrowRight','Home','End', 'Space'].includes(step.key) || step.inputId !== undefined) throw new Error('Unapproved generated key press');
         compiled.value = step.key;
       } else if (step.inputId !== undefined || step.key !== undefined) throw new Error('Click steps cannot supply input values');
       return compiled;
@@ -141,7 +143,7 @@ function validateRetainedJourney(goal, journey) {
     } else {
       if (asserting || !['click', 'dblclick','hover', 'fill', 'press'].includes(step?.action)) throw new Error('Retained journey changed the allowed action/assertion order');
       if (step.action === 'fill' && !Object.values(goal.inputs).includes(step.value)) throw new Error('Retained journey changed an approved synthetic input');
-      if (step.action === 'press' && !['Enter', 'Tab', 'Escape', 'ArrowDown', 'ArrowUp', 'Space'].includes(step.value)) throw new Error('Retained journey changed an approved key press');
+      if (step.action === 'press' && !['Enter', 'Tab', 'Shift+Tab', 'Escape', 'ArrowDown', 'ArrowUp','ArrowLeft','ArrowRight','Home','End', 'Space'].includes(step.value)) throw new Error('Retained journey changed an approved key press');
     }
   }
   if (hash(actual.sort()) !== hash(expected)) throw new Error('Retained journey omitted or duplicated a trusted assertion');
