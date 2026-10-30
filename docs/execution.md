@@ -96,3 +96,23 @@ Docker must be running and the configured image must already be pulled. The requ
 Only explicitly trusted local fixtures can use process isolation: both `metadata.fixture: true` and `--allow-local-fixture` are required, with `config.execution.isolation: "process"`. This mode records fixture provenance, strips inherited credentials, and is used by the credential-free demo/tests. It is not an isolation boundary for untrusted code. Remote preparation forcibly disables it.
 
 Activation remains off by default. Set `QA_ENABLED=true` (or `config.enabled=true`) and `DRY_RUN=false` only during a separately authorized deployment. `DRY_RUN` prevents dispatch and all integration writes. Configure target, Drive, Slack, identity mapping, and protected environment before activation. Local execution tests do not establish that live GitHub Actions, Slack, or Drive configuration is correct.
+
+## Hosted public-network enrollment
+
+Portal policies may set `publicNetworkOnly: true`. Hosted Patchsentry always does.
+The browser proxy resolves every new HTTP or CONNECT destination and pins that
+connection to a checked global-unicast address. Mixed public/private DNS answers,
+loopback, metadata, reserved and transition addresses are denied. JSON API oracles
+use the same public-only connection policy and reject redirects. The provider VM
+network policy remains a separate defense; this code is not a VM-escape guarantee.
+
+Private runners retain the existing exact-origin enrollment behavior when this
+flag is absent. That is explicit company-managed private-network access, not a
+hosted bypass. Restrict that runner's network and use disposable previews. Do not
+enroll production systems or cloud metadata endpoints. Untrusted page/model
+content cannot edit the enrollment policy.
+
+Regression: `test/network.test.js`; run with loopback networking allowed. Existing
+real-browser regression checks can be enabled with `QA_PORTAL_BROWSER_TEST=1
+QA_AUTONOMY_BROWSER_TEST=1 npm test`. Additional Docker-framework tests require
+explicitly enrolled test images; skipped tests do not establish that coverage.

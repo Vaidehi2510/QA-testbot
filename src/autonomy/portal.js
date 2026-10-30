@@ -80,6 +80,7 @@ function validatePortalPolicy(
       "allowedBackends",
       "allowImages",
       "allowMutations",
+      "publicNetworkOnly",
       "allowSemanticMaintenance",
       "executeBaseline",
       "visual",
@@ -136,6 +137,7 @@ function validatePortalPolicy(
   bounded(input.timeoutMs, 1000, 1800000, "job deadline");
   if (typeof input.allowImages !== "boolean")
     throw new Error("Explicitly enroll the image-sharing policy");
+  if(input.publicNetworkOnly!==undefined&&typeof input.publicNetworkOnly!=="boolean")throw Error("publicNetworkOnly must be boolean");
   if (
     input.allowMutations !== undefined &&
     typeof input.allowMutations !== "boolean"
@@ -743,6 +745,7 @@ async function runPortal({
     url: job.testingProfile.previewUrlTemplate,
     pages: job.testingProfile.pages,
     browsers: job.testingProfile.browsers,
+    publicNetworkOnly: policy.publicNetworkOnly === true,
     allowMutations:
       job.testingProfile.allowMutations === true &&
       policy.allowMutations === true,

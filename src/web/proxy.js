@@ -2,21 +2,22 @@
 // redirect hops that Playwright does not expose to a routing callback.
 const http = require('node:http');
 const net = require('node:net');
+const {publicLookup,publicAddress}=require('./network');
 
-async function createPreviewProxy({ allowedOrigins, allowMutations, timeoutMs }) {
+async function createPreviewProxy({ allowedOrigins, allowMutations, timeoutMs, publicNetworkOnly=false }) {
   const allowed = new Set(allowedOrigins);
   const sockets = new Set();
   let blocked = 0;
   const server = http.createServer((request, response) => {
     let target;
     try { target = new URL(request.url); } catch { response.writeHead(400); response.end(); return; }
-    if (target.protocol !== 'http:' || target.username || target.password || !allowed.has(target.origin)
+    if (target.protocol !== 'http:' || target.username || target.password || !allowed.has(target.origin) || publicNetworkOnly && net.isIP(target.hostname.replace(/^\[|\]$/g,'')) && !publicAddress(target.hostname.replace(/^\[|\]$/g,''))
       || !allowMutations && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       blocked++; response.writeHead(403); response.end('Outside configured QA preview policy'); return;
     }
     const headers = { ...request.headers, host: target.host };
     for (const key of ['proxy-authorization', 'proxy-connection', 'connection']) delete headers[key];
-    const upstream = http.request(target, { method: request.method, headers, timeout: timeoutMs }, incoming => {
+    const upstream = http.request(target, { method: request.method, headers, timeout: timeoutMs, ...(publicNetworkOnly?{lookup:publicLookup(),agent:false}:{}) }, incoming => {
       response.writeHead(incoming.statusCode, incoming.headers);
       let bytes = 0;
       incoming.on('data', chunk => {
@@ -37,10 +38,10 @@ async function createPreviewProxy({ allowedOrigins, allowMutations, timeoutMs })
   server.on('connect', (request, client, head) => {
     let target;
     try { target = new URL(`https://${request.url}`); } catch { client.destroy(); return; }
-    if (target.username || target.password || target.pathname !== '/' || target.search || target.hash || !allowed.has(target.origin)) {
+    if (target.username || target.password || target.pathname !== '/' || target.search || target.hash || !allowed.has(target.origin) || publicNetworkOnly && net.isIP(target.hostname.replace(/^\[|\]$/g,'')) && !publicAddress(target.hostname.replace(/^\[|\]$/g,''))) {
       blocked++; client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
-    const upstream = net.connect({ host: target.hostname.replace(/^\[|\]$/g, ''), port: Number(target.port || 443) });
+    const upstream = net.connect({ host: target.hostname.replace(/^\[|\]$/g, ''), port: Number(target.port || 443), ...(publicNetworkOnly?{lookup:publicLookup()}:{}) });
     sockets.add(upstream);
     upstream.setTimeout(timeoutMs, () => upstream.destroy());
     upstream.on('connect', () => {

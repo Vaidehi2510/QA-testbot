@@ -235,6 +235,7 @@ function validateWebSuite(input, metadata) {
     throw new Error(
       "Choose a distinct explicit Chromium, Firefox, and/or WebKit matrix",
     );
+  if(input.publicNetworkOnly!==undefined&&typeof input.publicNetworkOnly!=="boolean")throw Error("publicNetworkOnly must be an explicit boolean policy");
   const discovery = validateDiscovery(input.discovery),
     visual = validateVisual(input.visual);
   return {
@@ -248,6 +249,7 @@ function validateWebSuite(input, metadata) {
     viewports,
     timeoutMs,
     revisionHeader,
+    publicNetworkOnly: input.publicNetworkOnly === true,
     allowMutations: input.allowMutations === true,
     journeys,
     targetEnvironment: "preview",
@@ -975,7 +977,7 @@ async function runWebAudit({
                           browser: engine,
                           viewport: viewport.name,
                         });
-                  if(step.action==='expectApi')await require('./api-assertion').assertApiResponse({step,suite,metadata,context,fetchImpl:apiFetch});
+                  if(step.action==='expectApi')await require('./api-assertion').assertApiResponse({step,suite,metadata,context,fetchImpl:suite.publicNetworkOnly&&apiFetch===fetch?require('./network').publicFetch:apiFetch});
                   else if(step.action==='expectFocused'){if(!await locator.evaluate(el=>el===document.activeElement))throw new Error('The approved keyboard focus target was not focused');}
                   else if (step.action === "click")
                     await interact(page, () => locator.click());
