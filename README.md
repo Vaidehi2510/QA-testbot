@@ -242,3 +242,7 @@ Product-specific GitHub App installation, Slack delivery, Google permissions, ac
 Release verification additionally covers exact-artifact browser headers, complete-version CI imports without PR numbers, changed build/test inputs, deployment-gate freshness and policy checks, and offline authored tests that catch a synthetic boundary defect while preserving the source mount. These fixtures do not establish universal real-device compatibility or commercial benchmark superiority.
 
 Product teams, optional Slack updates, roles/invitations, recording, parallel workers and enrolled device pools: [team operations guide](docs/team-operations.md). Device infrastructure remains separately provisioned.
+
+## License
+
+Licensed under the [MIT License](LICENSE). Copyright (c) 2026 Vaidehi Pandya.
