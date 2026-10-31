@@ -26,10 +26,14 @@ jobs:
             sudo install -m 0644 "$RUNNER_TEMP/patchsentry-browsers.apparmor" /etc/apparmor.d/patchsentry-browsers
             sudo apparmor_parser --replace /etc/apparmor.d/patchsentry-browsers
           fi
+      - name: Prepare locked public dependencies outside the offline test runtime
+        run: docker build --tag patchsentry-offline-tests:ci tools/test-image
       - name: Unit and real browser integration tests
         run: node --test --test-concurrency=4 test/*.test.js
         env:
           QA_AUTONOMY_BROWSER_TEST: '1'
           QA_PORTAL_BROWSER_TEST: '1'
+          QA_PUBLIC_TEST_IMAGE: patchsentry-offline-tests:ci
+          QA_WORKSPACE_TEST_IMAGE: patchsentry-offline-tests:ci
       - run: npm run demo:web
       - run: node src/web/demo-advanced.js
