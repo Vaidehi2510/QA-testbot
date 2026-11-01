@@ -1,0 +1,51 @@
+name: Bug report
+description: Report unexpected behavior with a reproducible synthetic example.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thank you for helping improve Patchsentry. This is a public form.
+        Report possible vulnerabilities privately using [SECURITY.md](https://github.com/Vaidehi2510/QA-testbot/blob/main/SECURITY.md).
+        Remove secrets, personal information and private product data.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and revision
+      description: Include the affected commit, operating system and relevant Node/Java/browser/tool versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Give exact steps or commands using a small synthetic example. Link related issues if useful.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the error or incorrect result and distinguish a product failure from an infrastructure failure.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Optional logs, screenshots or a minimal example. Identify mocked responses and checks that were not run.
+    validations:
+      required: false
+  - type: checkboxes
+    id: public-safety
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed secrets and private data, and this is not a private vulnerability report.
+          required: true

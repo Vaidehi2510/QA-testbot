@@ -1,0 +1,49 @@
+name: Documentation, accessibility or reproduction feedback
+description: Improve clarity, newcomer setup, keyboard access or the experience of reproducing a result.
+title: "[Feedback] "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        You do not need to submit code to help. Please describe what you actually tried.
+        Remove private data from screenshots and logs. Report security issues using
+        [SECURITY.md](https://github.com/Vaidehi2510/QA-testbot/blob/main/SECURITY.md).
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What would you like to improve?
+      options:
+        - Documentation or wording
+        - Setup or reproducing a result
+        - Keyboard or assistive-technology access
+        - Responsive layout or visual clarity
+        - Other feedback
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: Page, file or command
+      description: Include a link, commit and any relevant device/browser/tool version.
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: What did you try, and what happened?
+      description: Describe the steps and any barrier you encountered. Identify demo/sample data when applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: improvement
+    attributes:
+      label: What would make the experience clearer or more accessible?
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Optional redacted evidence
+      description: Screenshots, reproduction output or assistive-technology observations are useful. Do not include personal or customer data.
+    validations:
+      required: false

@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If Patchsentry helps your work, please cite this software and identify the exact repository commit or release you used."
+type: software
+title: "Patchsentry: automated product QA"
+authors:
+  - family-names: Pandya
+    given-names: Vaidehi
+repository-code: "https://github.com/Vaidehi2510/QA-testbot"
+url: "https://patchsentry.vercel.app/open-source"
+license: MIT
+keywords:
+  - quality assurance
+  - reproducible testing
+  - release evidence
+  - model-assisted review

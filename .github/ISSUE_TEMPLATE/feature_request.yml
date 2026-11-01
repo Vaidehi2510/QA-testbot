@@ -1,0 +1,38 @@
+name: Feature or improvement
+description: Explain a user problem and a focused proposed improvement.
+title: "[Idea] "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Proposals from users, designers, researchers and developers are welcome.
+        Keep this public discussion free of credentials and private data.
+        For possible vulnerabilities, use [SECURITY.md](https://github.com/Vaidehi2510/QA-testbot/blob/main/SECURITY.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Who has the problem, and what are they trying to do?
+      description: Describe a concrete workflow. Separate observed experience from expected benefits.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed improvement
+      description: Describe the smallest useful change and any alternatives you considered.
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: How could we verify it helps?
+      description: Suggest an acceptance example, test, reproduction or user feedback needed.
+    validations:
+      required: false
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Would you like help contributing?
+      description: Optional. Explain whether you want to help with design, documentation, testing or code.
+    validations:
+      required: false

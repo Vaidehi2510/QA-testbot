@@ -1,22 +1,45 @@
 # Patchsentry — automated product QA
 
-A standalone QA engine for **pull requests, CI builds and complete release versions**, with an optional **OpenRouter or local AI team**: browse models, assign specialists to test planning, code review, security, UI/UX, and failure triage, then run trusted test suites and report the evidence. A local dashboard manages models and shows findings, suggested fixes, candidate tests, and review costs.
+Patchsentry helps student teams, research-software maintainers and small product teams check **pull requests, CI builds and complete releases**. This repository contains its QA engine: trusted tests produce revision-bound outcomes, evidence and suggested fixes while the connected product's source stays read-only.
 
-The [autonomous QA runner](docs/autonomous-qa.md) adds bounded browser discovery, generated declarative regression journeys grounded in trusted assertions, independent replay, retained tests, semantic selector maintenance, and explicit visual baselines. Chromium, Firefox, and WebKit are selectable. The [Patchsentry portal](https://patchsentry.vercel.app) can queue exact-revision work for an explicitly enrolled outbound runner. Product source stays read-only; browser/native infrastructure and business expectations must still be supplied.
+[Start here: reproduce a defect without an account or API key](docs/reviewer-quickstart.md) · [Product website](https://patchsentry.vercel.app) · [Illustrative dashboard demo](https://patchsentry.vercel.app/demo)
 
-The [build/release runner and deployment gate](docs/releases.md) assess the complete configured release suite, bind evidence to the source commit, platform, version/build name and artifact bytes, and block stale, missing, skipped or failed checks. The portal adds an owner-scoped test library: author/version/export tests separately from product source, and explicitly enroll enabled Node tests in the offline sandbox. Attested JUnit imports connect other CI frameworks and platforms. See the [sourced product comparison and platform matrix](docs/comparison.md).
+## Review the project first
 
-The [native adapter](docs/native-qa.md) runs explicit Android, iOS, and macOS journeys through an enrolled local Appium server on a disposable device or VM. It verifies a trusted build artifact against the requested revision before accepting evidence. Physical-device and native-driver verification require your provisioned environment.
+Use Node.js **24**, then run:
 
-The GitHub App controller runs tests in isolated GitHub Actions jobs, saves reports to Google Drive, and asks specific human questions through Slack. Its deterministic workflow remains usable without AI or a paid model service. Platform usage limits and hosting costs still apply.
+```sh
+git clone https://github.com/Vaidehi2510/QA-testbot.git
+cd QA-testbot
+npm ci --ignore-scripts
+npm run demo
+```
 
-The bot can comment, label, and report commit statuses on product PRs. It has no tool for editing product files, pushing fixes, or merging. Bot state, external browser suites, candidate tests, and reports stay in its separate workspace. See [testing a product without code changes](docs/product-qa.md).
+The demo runs real tests against temporary copies of a synthetic shipping application. The healthy version passes four tests; an intentionally introduced `$100` boundary defect fails one. Look for `expected: 0`, `actual: 5` and the final `Demo checks passed` message. GitHub, Slack and Drive operations are explicitly mocked; no accounts, keys, external writes or model calls are used. Dependency installation requires access to the public npm registry. See the [reviewer quick-start](docs/reviewer-quickstart.md) for expected output, interpretation, an optional mocked AI demonstration and the full verification recipe.
 
-QA completes when every required check passes and every mandatory question is resolved for the tested revision. There is no participation quota, reviewer coverage table, weekly missing-review report, or routine human sign-off. GitHub approvals alone do not complete QA. The MIT license is retained.
+## Three repositories, one project
+
+| Repository | Responsibility |
+| --- | --- |
+| [patchsentry-web](https://github.com/Vaidehi2510/patchsentry-web) | Main product overview, account/project website, model setup, hosted queue, current reports and release policy. Start here to explore the product. |
+| **QA-testbot (this repository)** | Executable QA engine, isolated test runners, browser/native adapters and deterministic no-key demonstrations. Start here to reproduce the fixture result. |
+| [Patchsentry-Ledger-Java](https://github.com/Vaidehi2510/Patchsentry-Ledger-Java) | Optional Java assessment archive. The website has a scoped archive adapter; a company must deploy and connect its service before remote archival is available. It is not required for this demo. |
+
+The website can dispatch supported hosted web QA without a customer-managed runner. An explicitly enrolled outbound runner is optional for authorized private-network, local-model or native environments. Business expectations, approved test environments, provider access and budgets remain operator-controlled. [Architecture and setup](https://patchsentry.vercel.app/architecture).
+
+## Supported execution and boundaries
+
+The optional **OpenRouter or local AI team** supports test planning, code review, security observations, UI/UX observations and failure triage. Models inspect bounded context and propose findings or candidate tests; a model summary cannot override failed deterministic assertions. Generated fixes remain suggestions. No tool edits, pushes or merges connected product source. Bot state, external test suites and reports stay in its separate workspace. See [testing a product without code changes](docs/product-qa.md).
+
+The [autonomous QA runner](docs/autonomous-qa.md) adds bounded browser discovery, declarative regression journeys grounded in trusted assertions, independent replay and approved visual baselines. Chromium, Firefox and WebKit are selectable. The [release runner](docs/releases.md) binds evidence to source, build/platform/version and artifact bytes; skipped, missing, stale or failed required checks cannot count as passed. The portal also supports an owner-scoped authored-test library and attested CI imports.
+
+The [native adapter](docs/native-qa.md) needs an explicitly enrolled Appium server and disposable application/device environment. Real device-provider interoperability, live AI diagnosis quality, customer defect recall and human-work savings require separate validation. Passing this controlled fixture does not establish full-product coverage or replacement of every QA responsibility. See the [verification and limitations record](https://github.com/Vaidehi2510/patchsentry-web/blob/main/docs/enterprise-verification.md).
+
+QA completes for a tested revision when every required automated check passes and any specifically required owner question is resolved. Ordinary GitHub approvals do not override a failed check. The [MIT license](LICENSE) covers this project's code; dependency licenses remain their own.
 
 ## Run locally
 
-Requires Node.js **22.17 or later**. The demos need no credentials or model calls. Install the locked public dependencies before running the full test suite:
+Use Node.js **24** to match CI (the package minimum is 22.17). The demos need no credentials or model calls. Install the locked public dependencies before running further checks:
 
 ```sh
 npm ci --ignore-scripts
@@ -45,7 +68,7 @@ npm run review -- --repo /path/to/product --base main --head HEAD
 
 This command reviews committed Git revisions and saves a local report. Add `--web-suite examples/web-suite.json` to run a bot-owned browser suite against your disposable preview. Configure the suite for your product first. Without that option, the command does not launch tests. Add `--dry-run` to preview without model calls or saved state. See [AI setup and limits](docs/ai.md), [dashboard instructions](docs/dashboard.md), and [test execution](docs/execution.md).
 
-For the live controller's GitHub App client dependencies:
+For a separately configured GitHub App controller's client dependencies:
 
 ```sh
 npm ci --ignore-scripts
@@ -53,7 +76,9 @@ npm ci --ignore-scripts
 
 `package-lock.json` pins the dependency tree. No credentials or production activation are included.
 
-## Architecture
+## Optional GitHub App controller
+
+The separate GitHub App workflow below is an optional integration path. **The QA controller in this repository is currently disabled** (verified October 31, 2026). The cron expression in its source does not mean it is running. The no-key demo and the website's separately configured hosted flow do not enable this controller. An authorized operator must configure and explicitly enable it for an installation.
 
 ```mermaid
 flowchart LR
@@ -69,10 +94,10 @@ flowchart LR
     Final --> SlackFinal[Final findings and targeted questions]
     Complete --> Drive[Drive current summary and run history]
     Decision[Authorized GitHub decision comment] --> State
-    Poll[10-minute reconciliation] --> State
+    Poll[Optional 10-minute reconciliation] --> State
 ```
 
-The bot stays in its own repository. The target application needs a supported test suite or a runnable preview with bot-owned browser checks, and installation of the GitHub App; it needs no bot source, workflow, Slack secret, or Drive credential. New PR revisions and comments are discovered on the ten-minute reconciliation schedule. Test completion uses a **`workflow_run` event**, without waiting for that schedule. Slack completion is sent before Drive I/O; when an upload is pending, a later message supplies its link.
+For this optional controller path, the target application needs a supported suite or runnable preview and installation of the configured GitHub App. Bot source, controller workflows and Slack/Drive credentials stay outside the product repository. **When the controller is configured and enabled**, its ten-minute reconciliation discovers new PR revisions/comments and `workflow_run` handles execution completion. Optional Slack delivery precedes Drive I/O; a later message can supply an upload link. None of those external deliveries occurs in the reviewer demo.
 
 The privileged controller checks out reviewed bot code. A separate prepare job downloads an exact commit archive as data. The executor uses a fresh GitHub-hosted runner and runs PR code in containers with no network, integration credentials, Docker socket, writable source mount, or privileged capabilities. Bot-owned preview tests use a separate bounded browser process with Chromium sandboxing, fresh contexts, and an explicit preview-origin policy; no target scripts are launched by that worker. The privileged collector reads bounded JSON and optional validated screenshot bytes from an artifact; it never extracts or executes that artifact's code. See [execution details](docs/execution.md).
 
@@ -202,7 +227,7 @@ Each request includes the check, revision, question, reason, and response instru
 
 Use `result:fail` when the check is unsatisfactory. The GitHub account must be a configured feature owner or decision reviewer. The PR author may resolve an `implementation` question, but cannot approve a requirement, visual judgment, or security interpretation solely by being the author. Each accepted decision records responder, explanation, timestamp, comment ID, check ID, and SHA. Acknowledgments, ordinary reviews, missing reasons, stale SHAs, pre-assessment comments, and unauthorized comments do not resolve checks. Editing an already processed comment does not revise a decision; post a new comment. A decision cannot override a failed or unsupported automated check.
 
-Only affected human checks wait. Independent automation continues. When automated checks pass and only a mandatory human decision remains, Slack says exactly: **“Automated checks passed; human QA review pending.”** When no required decision remains and checks pass, QA completes automatically. Responses are reconciled on the next ten-minute scan.
+Only affected human checks wait. Independent automation continues. When automated checks pass and only a mandatory human decision remains, Slack says exactly: **“Automated checks passed; human QA review pending.”** When no required decision remains and checks pass, QA completes automatically. For an enabled GitHub-controller installation, responses are reconciled on the next configured scan.
 
 ## State, reruns, and recovery
 
@@ -210,7 +235,7 @@ Only affected human checks wait. Independent automation continues. When automate
 
 Normal repeated events reuse the assessment. A new SHA or changed planning input creates a fresh assessment and invalidates old decisions without deleting history. Late artifacts can update historical reports but cannot replace the current assessment. Every artifact must match repository, PR, SHA, environment, logical run, and Actions attempt. Missing reports, zero tests, malformed TAP, canceled jobs, unsupported tests, and timeouts never report successful QA. Supplied summaries cannot override results.
 
-Use **Run workflow → QA controller** with `rerun_token` set to a unique value for an intentional rerun; optionally specify `pr_number` to scope that rerun. Reusing the token deduplicates delivery. GitHub's native Actions rerun is also supported: each Actions attempt has a separate result artifact and historical report. Rerunning after modifying trusted runner configuration creates a new assessment. New metadata/requirement assessments conservatively require new human decisions, even at the same SHA.
+For a configured installation whose controller has been explicitly enabled, use **Run workflow → QA controller** with `rerun_token` set to a unique value for an intentional rerun; optionally specify `pr_number` to scope that rerun. Reusing the token deduplicates delivery. GitHub's native Actions rerun is also supported: each Actions attempt has a separate result artifact and historical report. Rerunning after modifying trusted runner configuration creates a new assessment. New metadata/requirement assessments conservatively require new human decisions, even at the same SHA.
 
 External delivery attempts are persisted before calls. Exponential retry delays are bounded at one hour, with five attempts by default. Set manual `retry_integrations=true` after correcting an exhausted integration. This resets exhausted delivery attempts without inventing passing test results. A controller restart rediscovers dispatched workflow IDs by request key, reads completed artifacts, and retries pending uploads/messages. A lost HTTP response from a Slack webhook or workflow dispatch can still cause a rare duplicate external delivery; durable receipts prevent ordinary duplicates, and duplicate workflow results do not overwrite the selected run. Neither API supplies a general transaction with the bot's state store.
 
