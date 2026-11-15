@@ -79,6 +79,50 @@ Candidate source-code tests remain inert suggestions in this example. The source
 
 Both demonstration scripts were rerun successfully with the repository's installed locked dependencies on the macOS development host (Node26.3.1) and in an already prepared Linux/arm64 Node24 container with networking disabled and a read-only repository mount. This checks the demonstrations; dependency installation timing was not measured and no fresh-install timing guarantee is made. The broader product verification below remains a separate layer.
 
+
+### Windows PowerShell reproduction
+
+Verified on Windows 11 Pro 64-bit (build 26300), PowerShell 7.6.9, Node.js
+24.18.0 and npm 11.16.0, from a clean checkout of commit
+`19868098fde75e8d8ec0ae8c6483d3bd76db0429`. No credentials were supplied.
+
+The commands below work unchanged in PowerShell:
+
+```powershell
+npm ci --ignore-scripts --no-audit --no-fund
+npm run demo
+npm run demo:ai
+```
+
+The dependency installation used the lockfile and disabled lifecycle scripts.
+Both demo programs exited with code `0`. The deterministic demo reported:
+
+```text
+Outcome: passed
+Tests: 4 total, 4 passed, 0 failed, 0 skipped, 0 cancelled.
+Outcome: failed
+Tests: 4 total, 3 passed, 1 failed, 0 skipped, 0 cancelled.
+  expected: 0
+  actual: 5
+```
+
+The seeded application test failed as intended; it did not become a successful
+QA result. The AI demo reported:
+
+```text
+[REAL executor] 1 test(s) failed (exit 1).
+[REAL controller] Duplicate review deduplicated; AI suggestions never override the failed test.
+AI demo passed. All temporary artifacts removed; no external writes or model charges.
+```
+
+GitHub, Slack and Drive operations and owner decisions were mocked, as were the
+AI demo's model replies. Fixture Node test subprocesses and assertions ran for
+real. The deterministic demo reported cleanup, and no `qa-bot-demo-*` or
+`qa-ai-demo-*` directories remained in the temporary directory after the runs.
+No Windows-specific command change or portability failure was observed in this
+path. This reproduction does not cover the full suite, live services, browser
+or native-device integrations, or isolated execution of untrusted product code.
+
 ## 3. Read the evidence and limitations
 
 The [verification record](https://github.com/Vaidehi2510/patchsentry-web/blob/main/docs/enterprise-verification.md) separates actual execution, injected provider fixtures, seeded-defect challenges and remaining external validation. It preserves the original four-defect challenge's **two detections and two misses**, plus the later regressions that caught those misses. Follow-up regressions are not new independent held-out recall evidence.
